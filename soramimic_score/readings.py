@@ -1,11 +1,15 @@
-"""Dictionary alternatives and conservative acoustic pronunciation selection."""
+"""Yomi pronunciations, dictionary alternatives and acoustic selection."""
 from __future__ import annotations
 
 import csv
 import math
+from threading import Lock
 
 from .audio import ReadingSelection
 from .japanese import kana_to_moras, katakana, mora_distance, mora_vowel
+
+
+_YOMI_LOCK = Lock()
 
 
 def _node_reading(node):
@@ -55,9 +59,47 @@ def dictionary_candidates(lines):
 
 
 def dictionary_readings(_path, lines):
-    return tuple(ReadingSelection(candidates[0], "unidic-lite", 1.0, candidates,
-                                  {"reason": "dictionary", "confidence_available": False})
-                 for candidates in dictionary_candidates(lines))
+    """Use Yomi first, supplement with UniDic, and retain each candidate's origin.
+
+    Import failures and engine errors propagate instead of silently disabling
+    Yomi. UniDic may not read English/numbers that Yomi can pronounce.
+    """
+    from soramimic_yomi import get_yomi_candidates
+
+    output = []
+    for line in lines:
+        provenance = {}
+        # Yomi initializes a process-wide OpenJTalk user dictionary lazily.
+        with _YOMI_LOCK:
+            yomi_candidates = get_yomi_candidates(line.text, nbest=32)
+        for candidate in yomi_candidates:
+            kana = katakana(candidate.reading)
+            if not kana or "".join(kana_to_moras(kana)) != kana:
+                continue
+            entry = provenance.setdefault(kana, {
+                "kana": kana, "sources": ["soramimic-yomi"], "yomi_candidates": [],
+            })
+            entry["yomi_candidates"].append(candidate.to_dict())
+        yomi_status = "ok" if provenance else "no-pronunciation"
+        try:
+            alternatives = dictionary_candidates((line,))[0]
+            unidic_status = "ok"
+        except ValueError:
+            alternatives = ()
+            unidic_status = "no-pronunciation"
+        for kana in alternatives:
+            entry = provenance.setdefault(kana, {"kana": kana, "sources": []})
+            entry["sources"].append("unidic-lite")
+        if not provenance:
+            raise ValueError("Neither soramimic-yomi nor UniDic could pronounce the lyric line")
+        candidates = tuple(provenance)
+        source = provenance[candidates[0]]["sources"][0]
+        output.append(ReadingSelection(candidates[0], source, 1.0, candidates, {
+            "reason": "dictionary", "confidence_available": False,
+            "candidate_provenance": list(provenance.values()),
+            "yomi_status": yomi_status, "unidic_status": unidic_status,
+        }))
+    return tuple(output)
 
 
 def _comparison_moras(kana):
@@ -129,7 +171,7 @@ def select_acoustic_reading(candidates, transcripts):
                 detail["reason"] = "acoustic-agreement"
             else:
                 detail["reason"] = "weak-evidence"
-    return ReadingSelection(candidates[selected], "unidic-kana-whisper", 1.0,
+    return ReadingSelection(candidates[selected], "kana-whisper", 1.0,
                             tuple(candidates), detail)
 
 

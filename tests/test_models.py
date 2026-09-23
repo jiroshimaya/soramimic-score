@@ -64,12 +64,15 @@ class ModelTests(unittest.TestCase):
         self.assertFalse(calls[1][1]["vad_filter"])
         self.assertFalse(calls[1][1]["condition_on_previous_text"])
 
-    @unittest.skipUnless(importlib.util.find_spec("MeCab"), "audio dependencies not installed")
-    def test_real_dictionary_pronunciation_and_unknown_words(self):
+    @unittest.skipUnless(importlib.util.find_spec("soramimic_yomi") and importlib.util.find_spec("MeCab"),
+                         "audio dependencies not installed")
+    def test_real_pronunciation_uses_yomi_and_handles_english(self):
         readings = dictionary_readings(None, [LyricLine("春が来た。")])
         self.assertEqual(readings[0].kana, "ハルガキタ")
-        with self.assertRaises(ValueError):
-            dictionary_readings(None, [LyricLine("xyzzyqwerty")])
+        self.assertEqual(readings[0].source, "soramimic-yomi")
+        readings = dictionary_readings(None, [LyricLine("hello")])
+        self.assertEqual(readings[0].kana, "ハロー")
+        self.assertEqual(readings[0].source, "soramimic-yomi")
 
     def test_cli_runs_configured_audio_pipeline_and_writes_loadable_json(self):
         from soramimic_score import AudioAdapters
@@ -156,7 +159,8 @@ class ModelTests(unittest.TestCase):
 
             # Supplied text gets a coarse CTC window, then the selected reading
             # is aligned afresh. No lyric recognizer is involved.
-            with patch("soramimic_score.models.dictionary_candidates", return_value=(("アア", "ア"),)), \
+            with patch("soramimic_score.models.dictionary_readings", return_value=(
+                    ReadingSelection("アア", "soramimic-yomi", 1, ("アア", "ア")),)), \
                  patch("soramimic_score.models.transcribe_kana_views", return_value={"mix": ("ア",)}) as kana:
                 adapters = create_adapters(self.config)
                 selected = adapters.reading_selector(path, (LyricLine("ああ"),))

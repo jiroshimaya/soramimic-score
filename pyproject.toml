@@ -19,6 +19,7 @@ soramimic-score = "soramimic_score.__main__:main"
 
 [project.optional-dependencies]
 audio = [
+  "soramimic-yomi @ git+https://github.com/soramimic/soramimic-yomi@db8a5406732be25ca827dc5faa4d02f43c9927b2",
   "demucs==4.0.1",
   "faster-whisper>=1.0,<2",
   "torch>=2.2,<2.9",
