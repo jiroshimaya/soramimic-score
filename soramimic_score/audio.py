@@ -12,6 +12,10 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 import math
 from pathlib import Path
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .models import ModelConfig
 
 from .alignment import ObservedSingingUnit, build_known_lyrics_document
 from .document import ScoreDocument, compile_score
@@ -285,9 +289,10 @@ def build_audio_observations(
 
 def analyze_audio(
     audio_path: str | Path,
-    adapters: AudioAdapters,
+    adapters: AudioAdapters | None = None,
     *,
     lyrics: Sequence[str] | None = None,
+    model_config: ModelConfig | None = None,
 ) -> ScoreDocument:
     """Run configured acoustic adapters and compile one canonical score JSON model.
 
@@ -298,6 +303,13 @@ def analyze_audio(
     path = Path(audio_path)
     if not path.is_file():
         raise FileNotFoundError(path)
+    if adapters is not None and model_config is not None:
+        raise ValueError("Specify adapters or model_config, not both")
+    if adapters is None:
+        from .models import create_adapters
+        if model_config is None:
+            raise ValueError("model_config with local SheetSage2 directories is required")
+        adapters = create_adapters(model_config)
 
     if lyrics is None:
         if adapters.lyric_recognizer is None:
