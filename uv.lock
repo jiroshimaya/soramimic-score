@@ -1,0 +1,23 @@
+version = 1
+revision = 3
+requires-python = ">=3.11"
+
+[[package]]
+name = "jasyllablesep"
+version = "0.0.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/ed/12/d17f2f8418cf50df06cdfb35bc5991e9a817efe479e5df76d5b2c76127b9/jasyllablesep-0.0.0.tar.gz", hash = "sha256:cd9b02641cb70852b9ee67148821134a61142c73f477ad83e4c43b8875b0a3ab", size = 3114, upload-time = "2024-05-14T14:20:44.621Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/e9/4a/43ec36752083b03929ee277afd6d15aa9c710438b72991f23bfa7214e7cc/jasyllablesep-0.0.0-py3-none-any.whl", hash = "sha256:d2ed34f87b0c0047e344bd1772c3da447b23df6afa6cd5b16ad491cf4f8ef558", size = 3269, upload-time = "2024-05-14T14:20:42.654Z" },
+]
+
+[[package]]
+name = "soramimic-score"
+version = "0.1.0"
+source = { editable = "." }
+dependencies = [
+    { name = "jasyllablesep" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "jasyllablesep", specifier = "==0.0.0" }]
