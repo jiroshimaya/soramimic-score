@@ -64,9 +64,9 @@ class CorrespondenceConfig:
         if any(not math.isfinite(value) or value < 0 for value in numeric):
             raise ValueError("correspondence weights and base costs must be finite and nonnegative")
 
-    # Soramimic Video used these names while Stage 3 still accepted measured
-    # phone boundaries.  The production path now consumes only mora-CTC anchors
-    # and SheetSage2 notes, so they are permanently neutral compatibility views.
+    # Older callers used these names while the pipeline still accepted measured
+    # phone boundaries. The production path now consumes only mora-CTC anchors
+    # and melody notes, so they are permanently neutral compatibility views.
     @property
     def vowel_onset_weight(self) -> float:
         return 0.0

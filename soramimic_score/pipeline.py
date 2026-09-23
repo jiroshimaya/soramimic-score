@@ -1,9 +1,9 @@
 """The single production Stage 3 execution path.
 
 Text recognition, reading selection, CTC alignment, and melody transcription
-belong to the Soramimic Video adapters.  This package accepts their immutable
-observation document, decodes a note-preserving correspondence once, and
-compiles one realization.
+belong to adapters supplied by the caller. This package accepts their immutable
+observation document, decodes a note-preserving correspondence once, and compiles
+one realization.
 """
 
 from __future__ import annotations

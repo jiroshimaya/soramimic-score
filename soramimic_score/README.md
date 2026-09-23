@@ -1,11 +1,11 @@
 # Soramimic Score Stage 3コア
 
-`soramimic_score`は、Soramimic Videoと共有する、音声モデルに依存しない本番コアです。
+`soramimic_score`は、音声モデルに依存しない歌詞・音符対応付けの本番コアです。
 選択済みの歌詞・読みと、独立に推定されたメロディのノート候補を対応付け、元の情報へ
 戻れる歌唱計画へ変換します。
 
 音声モデルの実行方法は`AudioAdapters`で差し替えます。モデル自体と運用上の判断policyは、
-現在はSoramimic Videoが担当します。
+このライブラリの利用側が与えます。
 
 - Demucsによる音源分離
 - 未知歌詞に対する通常Whisperの表層認識
@@ -142,7 +142,7 @@ scoreは参照/XFノート、F0、ノート信頼度、歌唱単位区間を入�
 
 `align_correspondence`と`run_correspondence_document`は、比較用として以前の
 semi-Markov対応付けmodelを保持しています。本番の`run_stage3_document`および
-Soramimic Video bridgeからは呼び出しません。
+公開している音源解析経路からは呼び出しません。
 
 ## 正本JSONとCLI
 
