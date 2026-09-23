@@ -4,7 +4,8 @@
 選択済みの歌詞・読みと、独立に推定されたメロディのノート候補を対応付け、元の情報へ
 戻れる歌唱計画へ変換します。
 
-現在、この境界より前にある音声モデルadapterと判断policyはSoramimic Videoが担当します。
+音声モデルの実行方法は`AudioAdapters`で差し替えます。モデル自体と運用上の判断policyは、
+現在はSoramimic Videoが担当します。
 
 - Demucsによる音源分離
 - 未知歌詞に対する通常Whisperの表層認識
@@ -12,9 +13,41 @@
 - ReazonSpeechかなCTCによるモーラ時刻の整列
 - SheetSage2によるメロディ推定
 
-このパッケージ自身は、音源の読み込み、各モデルの実行、歌詞表層の選択、再認識を
-行いません。既知歌詞と自動認識した歌詞は、Soramimic Videoが表層と読みを選んだ後、
-同じStage 3経路へ入ります。
+このパッケージはモデルを同梱しませんが、音源から各adapterを呼び出し、結果を検証して
+正本JSONへ変換する実行経路を提供します。既知歌詞と自動認識した歌詞は、表層と読みを
+選んだ後、同じStage 3経路へ入ります。
+
+## 音源からの実行
+
+`analyze_audio`は、次の4種類のadapterを順番に呼び出します。
+
+1. 歌詞行の認識（正式歌詞を渡した場合は省略）
+2. 各行の読みの選択
+3. モーラ時刻の整列
+4. メロディノートの推定
+
+```python
+from soramimic_score import AudioAdapters, analyze_audio, dump
+
+adapters = AudioAdapters(
+    lyric_recognizer=recognize_lyrics,
+    reading_selector=select_readings,
+    mora_aligner=align_moras,
+    melody_transcriber=transcribe_melody,
+)
+score = analyze_audio("song.wav", adapters)
+dump(score, "song.score.json")
+```
+
+正式歌詞がある場合は`lyrics`へ行単位で渡します。この場合、歌詞認識adapterは呼ばれません。
+
+```python
+score = analyze_audio("song.wav", adapters, lyrics=("一行目", "二行目"))
+```
+
+adapter間の値には`LyricLine`、`ReadingSelection`、`AlignedMora`、`MelodyNote`を使います。
+時刻・順序・かな・MIDI音高・信頼度はStage 3へ入る前に検証されます。モデル固有の生出力や
+checkpointは、この境界の外に置きます。
 
 ## 入力契約
 
