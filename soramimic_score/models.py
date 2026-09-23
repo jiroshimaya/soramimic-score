@@ -251,5 +251,8 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None) -> 
             })
         return tuple(result)
 
+    def lyric_reading(text):
+        return dictionary_readings(None, (LyricLine(text),))[0].kana
+
     return AudioAdapters(select_readings if config.acoustic_readings else dictionary_readings,
-                         align, melody, recognize)
+                         align, melody, recognize, lyric_reading)

@@ -30,6 +30,32 @@ class ModelTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "LICENSE"):
             create_adapters(self.config)
 
+    def test_cli_adjustment_requires_a_lyrics_file(self):
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+            analyze_main(["input.wav", "--output", "score.json", "--sheetsage-model", "model",
+                          "--sheetsage-base", "base", "--adjust-lyrics"])
+        self.assertEqual(error.exception.code, 2)
+
+    def test_cli_forwards_adjustment_and_preserves_input_file(self):
+        from soramimic_score import AudioAdapters
+        audio, lyrics, output = self.root / "input.wav", self.root / "lyrics.txt", self.root / "score.json"
+        audio.touch()
+        lyrics.write_text("耳\n空", encoding="utf-8")
+        adapters = AudioAdapters(
+            fixtures.AudioPipelineTests._readings, fixtures.AudioPipelineTests._moras,
+            fixtures.AudioPipelineTests._melody, lambda _: (LyricLine("空", 0, .4),),
+        )
+        with patch("soramimic_score.models.create_adapters", return_value=adapters), \
+             patch("soramimic_score.models.separate_vocals"), \
+             contextlib.redirect_stdout(io.StringIO()):
+            result = analyze_main([str(audio), "--output", str(output),
+                                   "--sheetsage-model", str(self.config.sheetsage_model),
+                                   "--sheetsage-base", str(self.config.sheetsage_base),
+                                   "--lyrics", str(lyrics), "--adjust-lyrics"])
+        self.assertEqual(result, 0)
+        self.assertEqual(load(output).score.canonical_text, "空")
+        self.assertEqual(lyrics.read_text(encoding="utf-8"), "耳\n空")
+
     def test_lab_normalizes_overlap_and_preserves_pitch(self):
         path = self.root / "melody.lab"
         path.write_text("0.2\t0.5\t62\n0\t0.3\t60\n")

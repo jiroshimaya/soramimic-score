@@ -55,7 +55,11 @@ def analyze_main(argv) -> int:
     parser.add_argument("--demucs-checkpoint", type=Path, help="取得済みHTDemucsチェックポイント")
     parser.add_argument("--kana-model", default="sbintuitions/kana-whisper")
     parser.add_argument("--lyrics", type=Path, help="UTF-8歌詞ファイル（1行1フレーズ）")
+    parser.add_argument("--adjust-lyrics", action="store_true",
+                        help="音源の認識結果に合わせ、入力歌詞を行単位で削除・補完する")
     args = parser.parse_args(argv)
+    if args.adjust_lyrics and args.lyrics is None:
+        parser.error("--adjust-lyrics には --lyrics が必要です")
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     if args.audio.resolve() == args.output.resolve() or (
         args.lyrics is not None and args.lyrics.resolve() == args.output.resolve()
@@ -69,7 +73,8 @@ def analyze_main(argv) -> int:
                              separate_vocals=not args.no_vocal_separation,
                              acoustic_readings=not args.dictionary_readings,
                              demucs_checkpoint=args.demucs_checkpoint, kana_model=args.kana_model)
-        score = analyze_audio(args.audio, model_config=config, lyrics=lyrics)
+        score = analyze_audio(args.audio, model_config=config, lyrics=lyrics,
+                              adjust_lyrics=args.adjust_lyrics)
         dump(score, args.output)
     except (ImportError, OSError, ValueError, RuntimeError) as exc:
         parser.exit(1, f"解析に失敗しました: {exc}\n")

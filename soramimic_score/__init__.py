@@ -2,6 +2,7 @@
 
 from .alignment import ObservedSingingUnit, build_known_lyrics_document
 from .models import ModelConfig
+from .lyrics import LyricAdjustment, adjust_known_lyrics
 from .audio import (
     AlignedMora,
     AudioAdapters,
@@ -85,6 +86,7 @@ __all__ = [
     "LinkCost",
     "LyricSpan",
     "LyricLine",
+    "LyricAdjustment",
     "Mora",
     "MelodyNote",
     "NoteCandidate",
@@ -108,6 +110,7 @@ __all__ = [
     "VocalizationExpansion",
     "VocalizationReattack",
     "align_correspondence",
+    "adjust_known_lyrics",
     "analyze_audio",
     "boundaryless_correspondence_config",
     "build_known_lyrics_document",
