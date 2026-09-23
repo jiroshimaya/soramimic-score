@@ -9,6 +9,8 @@
 | 用途 | モデル | ライセンス・配布元 |
 | --- | --- | --- |
 | 歌詞認識 | Whisper / faster-whisper変換モデル | [MIT](https://github.com/openai/whisper/blob/main/LICENSE)、[変換モデル](https://huggingface.co/Systran/faster-whisper-large-v3) |
+| ボーカル分離 | Demucs / HTDemucs | [MIT](https://github.com/facebookresearch/demucs/blob/main/LICENSE)、[配布元](https://github.com/facebookresearch/demucs) |
+| 音声による読み選択 | KanaWhisper | [MITのモデル表記](https://huggingface.co/sbintuitions/kana-whisper)、[基盤Whisper](https://github.com/openai/whisper/blob/main/LICENSE) |
 | 発音時刻 | ReazonSpeech japanese-wav2vec2-base-rs35kh | [Apache-2.0](https://huggingface.co/reazon-research/japanese-wav2vec2-base-rs35kh) |
 | 音高推定 | SheetSage2 | [CC BY-NC 4.0のモデル表記](https://huggingface.co/m-a-p/SheetSage2)、[LICENSE](https://huggingface.co/m-a-p/SheetSage2/blob/main/LICENSE) |
 | SheetSage2の基盤 | MERT-v2-FullSong | [CC BY-NC 4.0](https://huggingface.co/m-a-p/MERT-v2-FullSong) |
@@ -28,6 +30,7 @@ SheetSage2側の[外部素材に関する表記](https://huggingface.co/m-a-p/Sh
 - 音声認識: [faster-whisper](https://github.com/SYSTRAN/faster-whisper)、[CTranslate2](https://github.com/OpenNMT/CTranslate2)
 - 推論: [PyTorch](https://github.com/pytorch/pytorch)、[torchaudio](https://github.com/pytorch/audio)、[Transformers](https://github.com/huggingface/transformers)
 - 読み生成: [mecab-python3](https://github.com/SamuraiT/mecab-python3)、[UniDic Lite](https://github.com/polm/unidic-lite)
+- ボーカル分離: [Demucs](https://github.com/facebookresearch/demucs)、[Julius](https://github.com/adefossez/julius)
 - 音声・数値処理: [librosa](https://github.com/librosa/librosa)、[SoundFile](https://github.com/bastibe/python-soundfile)、[NumPy](https://numpy.org/)
 - モデル付属処理: [mir_eval](https://github.com/craffel/mir_eval)、[pretty_midi](https://github.com/craffel/pretty-midi)
 

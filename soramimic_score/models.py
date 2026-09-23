@@ -2,15 +2,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-import csv
-import gc
+from contextlib import contextmanager
 import math
 import logging
 from pathlib import Path
 import tempfile
 
 from .audio import AudioAdapters, AlignedMora, LyricLine, MelodyNote, ReadingSelection
+from .audio import _run_adapter
+from .acoustic import KANA_MODEL, release_memory as _release, separate_vocals, transcribe_kana_views
 from .japanese import kana_to_moras, katakana
+from .readings import acoustic_windows, dictionary_candidates, dictionary_readings, select_acoustic_reading
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +25,10 @@ class ModelConfig:
     ctc_model: str = "reazon-research/japanese-wav2vec2-base-rs35kh"
     device: str = "cpu"
     local_files_only: bool = False
+    separate_vocals: bool = True
+    acoustic_readings: bool = True
+    demucs_checkpoint: Path | None = None
+    kana_model: str = KANA_MODEL
 
     def validate(self):
         if self.device not in {"cpu", "cuda"}:
@@ -56,41 +62,20 @@ def read_melody_lab(path: Path) -> tuple[MelodyNote, ...]:
     return tuple(normalized)
 
 
-def dictionary_readings(_path, lines):
-    import MeCab
-    import unidic_lite
-
-    tagger = MeCab.Tagger(f'-d "{unidic_lite.DICDIR}"')
-    result = []
-    for line in lines:
-        parts = []
-        node = tagger.parseToNode(line.text)
-        while node is not None:
-            if node.surface:
-                fields = next(csv.reader([node.feature]))
-                if fields[0] != "補助記号":
-                    pronunciation = fields[9] if len(fields) > 9 else "*"
-                    if pronunciation in {"", "*"}:
-                        pronunciation = katakana(node.surface)
-                    kana = "".join(kana_to_moras(pronunciation))
-                    if not kana or kana != katakana(pronunciation):
-                        raise ValueError(f"Cannot determine Japanese pronunciation: {node.surface!r}")
-                    parts.append(kana)
-            node = node.next
-        # This is dictionary selection, not a calibrated acoustic confidence.
-        result.append(ReadingSelection("".join(parts), "unidic-lite", 1.0))
-    return tuple(result)
+@contextmanager
+def prepared_adapters(path: Path, config: ModelConfig):
+    """Keep a private temporary vocal stem alive for exactly one analysis."""
+    config.validate()
+    with tempfile.TemporaryDirectory(prefix="soramimic-score-vocals-") as directory:
+        vocals = None
+        if config.separate_vocals:
+            vocals = Path(directory) / "vocals.wav"
+            _run_adapter("vocal separation", separate_vocals, path, vocals, config)
+        yield create_adapters(config, vocals_path=vocals)
 
 
-def _release():
-    import torch
-    gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-
-
-def create_adapters(config: ModelConfig) -> AudioAdapters:
-    """Create real Whisper / UniDic / ReazonSpeech / SheetSage2 adapters."""
+def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None) -> AudioAdapters:
+    """Low-level model adapters; use prepared_adapters to manage separation."""
     config.validate()
 
     def recognize(path):
@@ -123,7 +108,7 @@ def create_adapters(config: ModelConfig) -> AudioAdapters:
         import torchaudio.functional as taf
         from transformers import AutoProcessor, Wav2Vec2ForCTC
 
-        audio, rate = librosa.load(str(path), sr=16000, mono=True)
+        audio, rate = librosa.load(str(vocals_path or path), sr=16000, mono=True)
         if not len(audio) or not np.isfinite(audio).all():
             raise ValueError("Audio must contain finite samples")
         processor = AutoProcessor.from_pretrained(config.ctc_model,
@@ -195,7 +180,8 @@ def create_adapters(config: ModelConfig) -> AudioAdapters:
                         raise ValueError("CTC produced an empty mora interval")
                     confidence = min(float(span.score) for span in spans)
                     output.append(AlignedMora(li, mi, moras[li][mi], onset, offset,
-                                              confidence, "reazon-kana-ctc"))
+                                              confidence, "reazon-kana-ctc" +
+                                              ("/demucs-htdemucs" if vocals_path else "")))
             return tuple(output)
         finally:
             del model
@@ -226,4 +212,45 @@ def create_adapters(config: ModelConfig) -> AudioAdapters:
             del model
             _release()
 
-    return AudioAdapters(dictionary_readings, align, melody, recognize)
+    def select_readings(path, lines):
+        candidates = dictionary_candidates(lines)
+        defaults = tuple(ReadingSelection(row[0], "unidic-lite", 1.0, row,
+                                          {"reason": "single-candidate", "confidence_available": False})
+                         for row in candidates)
+        ambiguous = [index for index, row in enumerate(candidates) if len(row) > 1]
+        if not ambiguous:
+            return defaults
+        if all(line.start_sec is not None and line.end_sec is not None for line in lines):
+            line_windows = [(line.start_sec, line.end_sec) for line in lines]
+        else:
+            # Locate supplied lyrics without recognizing or rewriting their text.
+            # Re-align after pronunciation selection; these times are only context.
+            coarse = align(path, lines, defaults)
+            line_windows = [(min(m.start_sec for m in coarse if m.line_index == index),
+                             max(m.end_sec for m in coarse if m.line_index == index))
+                            for index in range(len(lines))]
+        import librosa
+        duration = librosa.get_duration(path=str(path))
+        windows, assignments = [], {}
+        for index in ambiguous:
+            selected_windows = acoustic_windows(*line_windows[index], duration)
+            assignments[index] = tuple(range(len(windows), len(windows) + len(selected_windows)))
+            windows.extend(selected_windows)
+        paths = {"mix": path}
+        if vocals_path is not None:
+            paths["vocals"] = vocals_path
+        transcripts = transcribe_kana_views(paths, windows, config)
+        result = list(defaults)
+        for index in ambiguous:
+            views = {view: "".join(rows[i] for i in assignments[index])
+                     for view, rows in transcripts.items()}
+            selection = select_acoustic_reading(candidates[index], views)
+            result[index] = replace(selection, detail={
+                **selection.detail, "windows_sec": [list(windows[i]) for i in assignments[index]],
+                "model": config.kana_model,
+                "vocal_separator": "demucs-htdemucs" if vocals_path else None,
+            })
+        return tuple(result)
+
+    return AudioAdapters(select_readings if config.acoustic_readings else dictionary_readings,
+                         align, melody, recognize)

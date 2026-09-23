@@ -49,6 +49,7 @@ FORBIDDEN_SUFFIXES = {
     ".safetensors",
     ".tar",
     ".tgz",
+    ".th",
     ".tflite",
     ".token",
     ".wav",

@@ -67,6 +67,7 @@ work/
 *.pickle
 *.pt
 *.pth
+*.th
 *.ckpt
 *.safetensors
 *.joblib
