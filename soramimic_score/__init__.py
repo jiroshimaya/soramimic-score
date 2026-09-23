@@ -1,6 +1,16 @@
 """Portable, evidence-preserving contracts for Soramimic Score."""
 
 from .alignment import ObservedSingingUnit, build_known_lyrics_document
+from .audio import (
+    AlignedMora,
+    AudioAdapters,
+    AudioPipelineError,
+    LyricLine,
+    MelodyNote,
+    ReadingSelection,
+    analyze_audio,
+    build_audio_observations,
+)
 from .correspondence import (
     CorrespondenceAlternative,
     CorrespondenceConfig,
@@ -60,6 +70,9 @@ from .vocalization import (
 
 __all__ = [
     "Boundary",
+    "AlignedMora",
+    "AudioAdapters",
+    "AudioPipelineError",
     "CorrespondenceAlternative",
     "CorrespondenceConfig",
     "CorrespondenceResult",
@@ -69,7 +82,9 @@ __all__ = [
     "Link",
     "LinkCost",
     "LyricSpan",
+    "LyricLine",
     "Mora",
+    "MelodyNote",
     "NoteCandidate",
     "NoteOnlySpan",
     "NoteRunAssignment",
@@ -81,6 +96,7 @@ __all__ = [
     "PreservedNote",
     "Reading",
     "ReadingCandidate",
+    "ReadingSelection",
     "SCHEMA_VERSION",
     "ScoreDocument",
     "SingingUnit",
@@ -90,8 +106,10 @@ __all__ = [
     "VocalizationExpansion",
     "VocalizationReattack",
     "align_correspondence",
+    "analyze_audio",
     "boundaryless_correspondence_config",
     "build_known_lyrics_document",
+    "build_audio_observations",
     "compile_score",
     "dump",
     "dumps",

@@ -20,11 +20,11 @@ flowchart LR
 
 ## 現在の状態
 
-> **開発中:** 現在の`0.1`は、音源ファイルを直接解析する段階までは完成していません。
+音源からJSONまでを順番に実行する部分と、歌詞・音符を対応付ける部分は実装済みです。
 
-現在は、Soramimic Videoが認識した歌詞・音高・タイミングを受け取り、
-それらを対応付けてJSONにまとめる部分が利用できます。音源の読み込みから
-歌詞・音高を自動認識する部分も、今後このリポジトリへ移します。
+歌詞認識や音高推定などのAIモデル本体は、用途に合わせて差し替えられるように
+分離しています。現在、Soramimic Videoで使っている各モデルを、この共通の入口へ
+順次つなぎ替えています。
 
 ## 現在の使い方
 
@@ -39,6 +39,16 @@ CLIからも同じ変換を実行できます。
 
 ```sh
 soramimic-score --input observations.json --output song.score.json
+```
+
+音源から直接実行する場合は、歌詞認識・読み・タイミング・音高の各処理を
+`AudioAdapters`として渡します。
+
+```python
+from soramimic_score import analyze_audio, dump
+
+score = analyze_audio("song.wav", adapters)
+dump(score, "song.score.json")
 ```
 
 入力JSONの形式や対応付けの詳細は、
