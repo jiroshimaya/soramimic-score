@@ -1,0 +1,20 @@
+{
+  "marked_text": "｜きょう《きょー》も",
+  "g2p": {
+    "きょう": [
+      {"kana": "キョウ", "source": "synthetic-g2p", "score": 0.8}
+    ],
+    "も": [
+      {"kana": "モ", "source": "synthetic-g2p", "score": 0.9}
+    ]
+  },
+  "observations": [
+    {
+      "moras": ["キョ", "ー"],
+      "consonant_start_sec": 0.1,
+      "vowel_start_sec": 0.14,
+      "end_sec": 0.5,
+      "confidence": 0.91
+    }
+  ]
+}
