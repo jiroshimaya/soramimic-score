@@ -8,11 +8,11 @@ import logging
 from pathlib import Path
 import tempfile
 
-from .audio import AudioAdapters, AlignedMora, LyricLine, MelodyNote, ReadingSelection
+from .audio import AudioAdapters, AlignedMora, LyricLine, MelodyNote
 from .audio import _run_adapter
 from .acoustic import KANA_MODEL, release_memory as _release, separate_vocals, transcribe_kana_views
 from .japanese import kana_to_moras, katakana
-from .readings import acoustic_windows, dictionary_candidates, dictionary_readings, select_acoustic_reading
+from .readings import acoustic_windows, dictionary_readings, select_acoustic_reading
 
 logger = logging.getLogger(__name__)
 
@@ -213,10 +213,8 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None) -> 
             _release()
 
     def select_readings(path, lines):
-        candidates = dictionary_candidates(lines)
-        defaults = tuple(ReadingSelection(row[0], "unidic-lite", 1.0, row,
-                                          {"reason": "single-candidate", "confidence_available": False})
-                         for row in candidates)
+        defaults = dictionary_readings(path, lines)
+        candidates = tuple(reading.candidates for reading in defaults)
         ambiguous = [index for index, row in enumerate(candidates) if len(row) > 1]
         if not ambiguous:
             return defaults
@@ -246,7 +244,8 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None) -> 
                      for view, rows in transcripts.items()}
             selection = select_acoustic_reading(candidates[index], views)
             result[index] = replace(selection, detail={
-                **selection.detail, "windows_sec": [list(windows[i]) for i in assignments[index]],
+                **defaults[index].detail, **selection.detail,
+                "windows_sec": [list(windows[i]) for i in assignments[index]],
                 "model": config.kana_model,
                 "vocal_separator": "demucs-htdemucs" if vocals_path else None,
             })

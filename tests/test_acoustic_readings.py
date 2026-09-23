@@ -148,16 +148,22 @@ class PreparedAudioTests(unittest.TestCase):
         self.assertIn(evidence.id, result.observations.readings[0].evidence_ids)
 
     def test_single_dictionary_candidate_skips_kana_model(self):
-        with patch("soramimic_score.models.dictionary_candidates", return_value=(("ソラ",),)), \
+        with patch("soramimic_score.models.dictionary_readings", return_value=(
+                ReadingSelection("ソラ", "soramimic-yomi", 1, ("ソラ",)),)), \
              patch("soramimic_score.models.transcribe_kana_views") as transcribe:
             result = create_adapters(self.config).reading_selector(self.audio, (LyricLine("空"),))
         self.assertEqual(result[0].kana, "ソラ")
+        self.assertEqual(result[0].source, "soramimic-yomi")
         transcribe.assert_not_called()
 
     @unittest.skipUnless(importlib.util.find_spec("librosa"), "audio dependencies not installed")
     def test_audio_views_and_windows_are_used_for_selection(self):
         vocals = self.root / "vocals.wav"
-        with patch("soramimic_score.models.dictionary_candidates", return_value=(("アス", "アシタ"),)), \
+        provenance = [{"kana": "アス", "sources": ["soramimic-yomi"]},
+                      {"kana": "アシタ", "sources": ["unidic-lite"]}]
+        with patch("soramimic_score.models.dictionary_readings", return_value=(
+                ReadingSelection("アス", "soramimic-yomi", 1, ("アス", "アシタ"),
+                                 {"candidate_provenance": provenance}),)), \
              patch("librosa.get_duration", return_value=10), \
              patch("soramimic_score.models.transcribe_kana_views",
                    return_value={"mix": ("アシタ",), "vocals": ("アシタ",)}) as transcribe:
@@ -166,6 +172,8 @@ class PreparedAudioTests(unittest.TestCase):
         self.assertEqual(transcribe.call_args.args[0], {"mix": self.audio, "vocals": vocals})
         self.assertEqual(transcribe.call_args.args[1], [(.5, 6.5)])
         self.assertEqual(result[0].kana, "アシタ")
+        self.assertEqual(result[0].source, "kana-whisper")
+        self.assertEqual(result[0].detail["candidate_provenance"], provenance)
         self.assertEqual(result[0].detail["vocal_separator"], "demucs-htdemucs")
 
 

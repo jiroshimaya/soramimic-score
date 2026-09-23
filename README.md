@@ -15,7 +15,7 @@ flowchart TD
     C -- ある --> D["正式な歌詞をそのまま使用"]
     C -- ない --> E["歌詞を自動認識<br/>例: Whisper"]
 
-    D --> F["辞書から読み候補を生成<br/>UniDic Lite"]
+    D --> F["読み候補を生成<br/>soramimic-yomi + UniDic Lite"]
     E --> F
     F --> R["音声と照らして読み候補を選択<br/>KanaWhisper"]
     B --> R
@@ -38,8 +38,9 @@ flowchart TD
 ある場合は、自動認識で書き換えず、その歌詞を使います。JSONを保存の中心にして、
 各出力形式はJSONから作ります。点線の出力は今後追加する予定です。
 
-読みの選択では、原音と分離したボーカルを比較します。判断が曖昧なときは辞書の
-読みを維持します。発音時刻はボーカルから、歌詞本文とメロディは原音から推定します。
+読みは`soramimic-yomi`で生成し、UniDic Liteで別の候補を補います。
+原音と分離したボーカルを比較して候補を選び、判断が曖昧なときは最初の読みを維持します。
+発音時刻はボーカルから、歌詞本文とメロディは原音から推定します。
 
 ## 現在の状態
 
@@ -54,6 +55,7 @@ flowchart TD
 ## 現在の使い方
 
 ソースを取得したディレクトリで音声用の依存をインストールします。Python 3.11を推奨します。
+`soramimic-yomi`をGitから取得するため、Gitも必要です。
 
 ```sh
 pip install '.[audio]'
@@ -76,8 +78,9 @@ Whisper・Demucs・KanaWhisper・ReazonSpeechは初回使用時に取得しま�
 （UTF-8、1行1フレーズ）。
 
 ボーカル分離と音声による読み選択は標準で有効です。不要な場合は、
-`--no-vocal-separation`（原音で時刻を推定）や`--dictionary-readings`（辞書の読みのみ）を
+`--no-vocal-separation`（原音で時刻を推定）や`--dictionary-readings`（音声比較をせず読みを生成）を
 指定できます。分離済みの音声は一時ファイルとして扱い、解析終了時に削除します。
+`--dictionary-readings`の場合も`soramimic-yomi`を使います。
 Demucsの取得済み重みを指定する場合は、`--demucs-checkpoint models/955717e8-8726e21a.th`を
 付けます。指定しなければPyTorchのモデルキャッシュを使います。
 
