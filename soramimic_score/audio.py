@@ -82,14 +82,17 @@ MelodyTranscriber = Callable[[Path], Sequence[MelodyNote]]
 class AudioAdapters:
     """The four model boundaries needed by the audio pipeline.
 
-    ``lyric_recognizer`` may be omitted when ``lyrics`` are supplied to
-    :func:`analyze_audio`. The other adapters are required in both modes.
+    ``lyric_recognizer`` may be omitted when lyrics are supplied without adjustment.
+    ``lyric_reading`` optionally supplies linguistic readings for whole-line
+    comparison (otherwise normalized surface text is used). The other adapters
+    are required in both modes.
     """
 
     reading_selector: ReadingSelector
     mora_aligner: MoraAligner
     melody_transcriber: MelodyTranscriber
     lyric_recognizer: LyricRecognizer | None = None
+    lyric_reading: Callable[[str], str] | None = None
 
 
 class AudioPipelineError(RuntimeError):
@@ -308,25 +311,30 @@ def analyze_audio(
     *,
     lyrics: Sequence[str] | None = None,
     model_config: ModelConfig | None = None,
+    adjust_lyrics: bool = False,
 ) -> ScoreDocument:
     """Run configured acoustic adapters and compile one canonical score JSON model.
 
-    Supplying ``lyrics`` skips automatic lyric recognition. The selected text is
-    never rewritten by this function; pronunciation and timing remain separate
-    evidence supplied by their adapters.
+    Supplying ``lyrics`` skips recognition by default. With ``adjust_lyrics=True``,
+    whole input lines may be omitted or repeated and recognized lines added.
+    Matched input lines remain verbatim; the original input and decisions are
+    retained as evidence. Recognition errors can affect these edits.
     """
     path = Path(audio_path)
     if not path.is_file():
         raise FileNotFoundError(path)
     if adapters is not None and model_config is not None:
         raise ValueError("Specify adapters or model_config, not both")
+    if adjust_lyrics and lyrics is None:
+        raise ValueError("adjust_lyrics requires supplied lyrics")
     if adapters is None:
         from .models import prepared_adapters
         if model_config is None:
             raise ValueError("model_config with local SheetSage2 directories is required")
         with prepared_adapters(path, model_config) as prepared:
-            return analyze_audio(path, prepared, lyrics=lyrics)
+            return analyze_audio(path, prepared, lyrics=lyrics, adjust_lyrics=adjust_lyrics)
 
+    adjustment = None
     if lyrics is None:
         if adapters.lyric_recognizer is None:
             raise AudioPipelineError(
@@ -339,6 +347,15 @@ def analyze_audio(
         if isinstance(lyrics, (str, bytes)):
             raise TypeError("lyrics must be a sequence of lines, not one string")
         lines = _validate_lines(tuple(LyricLine(text) for text in lyrics), timed=False)
+        if adjust_lyrics:
+            from .lyrics import adjust_known_lyrics
+            if adapters.lyric_recognizer is None:
+                raise AudioPipelineError("lyrics", "lyric adjustment requires a recognizer")
+            recognized = _validate_lines(
+                _run_adapter("lyrics", adapters.lyric_recognizer, path), timed=True,
+            )
+            adjustment = adjust_known_lyrics(lyrics, recognized, reading=adapters.lyric_reading)
+            lines = adjustment.lines
 
     readings = _validate_readings(
         lines, _run_adapter("readings", adapters.reading_selector, path, lines),
@@ -351,6 +368,11 @@ def analyze_audio(
         _run_adapter("melody", adapters.melody_transcriber, path),
     )
     observations = build_audio_observations(lines, readings, moras, notes)
+    if adjustment is not None:
+        observations = replace(observations, evidence=observations.evidence + (Evidence(
+            "audio-lyric-adjustment", "soramimic_score.lyrics", "lyric-adjustment", 0.0,
+            adjustment.detail,
+        ),))
     line_windows = (
         {f"u{index}": (line.start_sec, line.end_sec)
          for index, line in enumerate(lines)

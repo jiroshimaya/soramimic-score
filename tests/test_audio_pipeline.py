@@ -114,6 +114,26 @@ class AudioPipelineTests(unittest.TestCase):
         self.assertEqual(note.confidence, 0)
         self.assertEqual(evidence.detail, {"confidence_available": False})
 
+    def test_known_lyrics_adjustment_is_opt_in_and_keeps_audit_evidence(self):
+        score = analyze_audio(
+            self.audio,
+            AudioAdapters(self._readings, self._moras, self._melody,
+                          lambda _: (LyricLine("空", 0, .4), LyricLine("空", .4, .8))),
+            lyrics=("耳", "空"), adjust_lyrics=True,
+        )
+        self.assertEqual(score.score.canonical_text, "空\n空")
+        audit = next(item for item in score.observations.evidence if item.kind == "lyric-adjustment")
+        self.assertEqual(audit.detail["supplied_lines"], ["耳", "空"])
+        self.assertEqual([row["operation"] for row in audit.detail["decisions"]],
+                         ["keep", "repeat", "remove"])
+
+    def test_adjustment_requires_known_lyrics_and_a_recognizer(self):
+        adapters = AudioAdapters(self._readings, self._moras, self._melody)
+        with self.assertRaisesRegex(ValueError, "requires supplied lyrics"):
+            analyze_audio(self.audio, adapters, adjust_lyrics=True)
+        with self.assertRaisesRegex(AudioPipelineError, "requires a recognizer"):
+            analyze_audio(self.audio, adapters, lyrics=("空",), adjust_lyrics=True)
+
     def test_inconsistent_mora_result_is_rejected_before_compilation(self):
         def bad_moras(_path, _lines, _readings):
             return (AlignedMora(0, 0, "ソ", 0, .2, .8),)
