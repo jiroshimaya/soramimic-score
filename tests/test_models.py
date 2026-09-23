@@ -81,13 +81,16 @@ class ModelTests(unittest.TestCase):
             fixtures.AudioPipelineTests._melody,
             lambda path: (LyricLine("空", 0, .4), LyricLine("耳", .4, .8)),
         )
-        with patch("soramimic_score.models.create_adapters", return_value=adapters) as factory:
+        with patch("soramimic_score.models.create_adapters", return_value=adapters) as factory, \
+             patch("soramimic_score.models.separate_vocals") as separator:
             with contextlib.redirect_stdout(io.StringIO()):
                 result = analyze_main([str(audio), "--output", str(output),
                                        "--sheetsage-model", str(self.config.sheetsage_model),
                                        "--sheetsage-base", str(self.config.sheetsage_base)])
         self.assertEqual(result, 0)
         self.assertEqual(factory.call_args.args[0], self.config)
+        self.assertEqual(separator.call_count, 1)
+        self.assertIsNotNone(factory.call_args.kwargs["vocals_path"])
         self.assertEqual(load(output).score.canonical_text, "空\n耳")
 
     def test_cli_failure_does_not_create_output(self):
@@ -150,6 +153,28 @@ class ModelTests(unittest.TestCase):
             self.assertGreater(moras[1].confidence, .99)
             known = align(path, (LyricLine("ああ"),), readings)
             self.assertEqual(moras, known)
+
+            # Supplied text gets a coarse CTC window, then the selected reading
+            # is aligned afresh. No lyric recognizer is involved.
+            with patch("soramimic_score.models.dictionary_candidates", return_value=(("アア", "ア"),)), \
+                 patch("soramimic_score.models.transcribe_kana_views", return_value={"mix": ("ア",)}) as kana:
+                adapters = create_adapters(self.config)
+                selected = adapters.reading_selector(path, (LyricLine("ああ"),))
+                self.assertEqual(selected[0].kana, "ア")
+                final = adapters.mora_aligner(path, (LyricLine("ああ"),), selected)
+                self.assertEqual(len(final), 1)
+                self.assertEqual(kana.call_args.args[1], [(0.0, 1.0)])
+
+            # Forced alignment uses the separated stem on the original clock.
+            import librosa
+            vocal_path = self.root / "vocals.wav"
+            sf.write(vocal_path, np.zeros(16000), 16000)
+            with patch("librosa.load", wraps=librosa.load) as audio_loader:
+                vocal_moras = create_adapters(self.config, vocals_path=vocal_path).mora_aligner(
+                    path, (LyricLine("ああ", 0, 1),), readings)
+            self.assertEqual(audio_loader.call_args.args[0], str(vocal_path))
+            self.assertIn("demucs-htdemucs", vocal_moras[0].source)
+            self.assertEqual([m.start_sec for m in vocal_moras], [m.start_sec for m in moras])
             with self.assertRaisesRegex(ValueError, "frames"):
                 align(path, (LyricLine("ああ", 0, .02),), readings)
 

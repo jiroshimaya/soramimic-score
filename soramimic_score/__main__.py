@@ -50,6 +50,10 @@ def analyze_main(argv) -> int:
     parser.add_argument("--ctc-model", default="reazon-research/japanese-wav2vec2-base-rs35kh")
     parser.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     parser.add_argument("--local-files-only", action="store_true")
+    parser.add_argument("--no-vocal-separation", action="store_true", help="ボーカル分離を省略")
+    parser.add_argument("--dictionary-readings", action="store_true", help="音声比較を省略し辞書の読みを使用")
+    parser.add_argument("--demucs-checkpoint", type=Path, help="取得済みHTDemucsチェックポイント")
+    parser.add_argument("--kana-model", default="sbintuitions/kana-whisper")
     parser.add_argument("--lyrics", type=Path, help="UTF-8歌詞ファイル（1行1フレーズ）")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(message)s")
@@ -61,7 +65,10 @@ def analyze_main(argv) -> int:
         lyrics = (tuple(line for line in args.lyrics.read_text(encoding="utf-8").splitlines()
                         if line.strip()) if args.lyrics else None)
         config = ModelConfig(args.sheetsage_model, args.sheetsage_base, args.whisper_model,
-                             args.ctc_model, args.device, args.local_files_only)
+                             args.ctc_model, args.device, args.local_files_only,
+                             separate_vocals=not args.no_vocal_separation,
+                             acoustic_readings=not args.dictionary_readings,
+                             demucs_checkpoint=args.demucs_checkpoint, kana_model=args.kana_model)
         score = analyze_audio(args.audio, model_config=config, lyrics=lyrics)
         dump(score, args.output)
     except (ImportError, OSError, ValueError, RuntimeError) as exc:

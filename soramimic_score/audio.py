@@ -9,10 +9,10 @@ into Soramimic Score's canonical JSON document.
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 import math
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from .models import ModelConfig
@@ -40,6 +40,8 @@ class ReadingSelection:
     kana: str
     source: str
     confidence: float
+    candidates: tuple[str, ...] = ()
+    detail: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -146,6 +148,10 @@ def _validate_readings(
         if not item.source or not kana_to_moras(item.kana):
             raise AudioPipelineError("readings", "every reading needs kana and a source")
         _confidence(item.confidence, "readings")
+        if item.candidates and (item.kana not in item.candidates or any(
+            not kana or "".join(kana_to_moras(kana)) != kana for kana in item.candidates
+        )):
+            raise AudioPipelineError("readings", "candidates must contain the selected kana reading")
     return result
 
 
@@ -218,18 +224,27 @@ def build_audio_observations(
 
     canonical_text = "\n".join(line.text for line in lines)
     spans: list[LyricSpan] = []
+    evidence: list[Evidence] = []
     offset = 0
-    for line, reading in zip(lines, readings, strict=True):
+    for index, (line, reading) in enumerate(zip(lines, readings, strict=True)):
+        evidence_ids = ()
+        if reading.candidates or reading.detail:
+            evidence_id = f"audio-reading-{index}"
+            evidence_ids = (evidence_id,)
+            evidence.append(Evidence(
+                evidence_id, reading.source, "reading-selection", reading.confidence,
+                {**reading.detail, "candidates": list(reading.candidates or (reading.kana,)),
+                 "selected": reading.kana},
+            ))
         spans.append(LyricSpan(
             line.text,
             (offset, offset + len(line.text)),
             (ReadingCandidate(
-                reading.kana, reading.source, reading.confidence,
+                reading.kana, reading.source, reading.confidence, evidence_ids,
             ),),
         ))
         offset += len(line.text) + 1
 
-    evidence: list[Evidence] = []
     observations: list[ObservedSingingUnit] = []
     for item in aligned_moras:
         evidence_id = f"audio-mora-{item.line_index}-{item.mora_index}"
@@ -306,10 +321,11 @@ def analyze_audio(
     if adapters is not None and model_config is not None:
         raise ValueError("Specify adapters or model_config, not both")
     if adapters is None:
-        from .models import create_adapters
+        from .models import prepared_adapters
         if model_config is None:
             raise ValueError("model_config with local SheetSage2 directories is required")
-        adapters = create_adapters(model_config)
+        with prepared_adapters(path, model_config) as prepared:
+            return analyze_audio(path, prepared, lyrics=lyrics)
 
     if lyrics is None:
         if adapters.lyric_recognizer is None:
