@@ -1,39 +1,39 @@
-# Soramimic Score Stage 3 core
+# Soramimic Score Stage 3コア
 
-`soramimic_score` is the model-free production core shared with Soramimic Video. It
-does one job: associate an already selected lyric realization with independent
-melody-note candidates, then compile the result into a reversible singing plan.
+`soramimic_score`は、Soramimic Videoと共有する、音声モデルに依存しない本番コアです。
+選択済みの歌詞・読みと、独立に推定されたメロディのノート候補を対応付け、元の情報へ
+戻れる歌唱計画へ変換します。
 
-Soramimic Video owns all audio-model adapters and policy before this boundary:
+現在、この境界より前にある音声モデルadapterと判断policyはSoramimic Videoが担当します。
 
-- Demucs separation;
-- normal Whisper surface transcription for unknown lyrics;
-- Japanese reading candidates and KanaWhisper reranking;
-- ReazonSpeech mora CTC alignment;
-- SheetSage2 melody transcription.
+- Demucsによる音源分離
+- 未知歌詞に対する通常Whisperの表層認識
+- 日本語の読み候補生成とKanaWhisperによる再順位付け
+- ReazonSpeechかなCTCによるモーラ時刻の整列
+- SheetSage2によるメロディ推定
 
-This package does not load audio, run those models, select lyric text, or rerun
-recognition. Known and automatically transcribed lyrics enter the same Stage 3
-path after Soramimic Video has selected their surface and reading.
+このパッケージ自身は、音源の読み込み、各モデルの実行、歌詞表層の選択、再認識を
+行いません。既知歌詞と自動認識した歌詞は、Soramimic Videoが表層と読みを選んだ後、
+同じStage 3経路へ入ります。
 
-## Input contract
+## 入力契約
 
-`IntermediateRepresentation` is the versioned JSON boundary. A fresh Stage 3
-input contains:
+`IntermediateRepresentation`がversioned JSONの入力境界です。新しいStage 3入力は、
+次の情報を持ちます。
 
-- canonical utterances, selected readings, morae, and singing units;
-- caller-supplied acoustic evidence and mora timing;
-- chronological `NoteCandidate` values from the melody adapter;
-- no precomputed correspondence links.
+- 正規の発話、選択した読み、モーラ、歌唱単位
+- 呼び出し側が与えた音響根拠とモーラ時刻
+- メロディadapterが出力した時系列順の`NoteCandidate`
+- 対応付け済みlinkをまだ含まないこと
 
-`build_known_lyrics_document` is a construction helper for the lyric and mora
-side of that document. Despite its historical name, the caller may use it for a
-surface transcription selected upstream; the helper does no recognition.
+`build_known_lyrics_document`は、歌詞とモーラ側の文書を組み立てる補助関数です。
+歴史的な名前とは異なり、上流で選択済みの自動認識表層にも使用できます。この関数は
+認識処理を行いません。
 
-Model-specific raw output stays with its adapter. Only normalized observations,
-confidence, IDs, and provenance cross this boundary.
+モデル固有の生出力は各adapter内に留めます。この境界を越えるのは、正規化した観測、
+信頼度、ID、出典情報だけです。
 
-## One production runner
+## 本番runner
 
 ```python
 from soramimic_score import VocalizationReattack
@@ -41,7 +41,7 @@ from soramimic_score.pipeline import run_stage3_document
 
 run = run_stage3_document(
     observation_document,
-    line_windows_by_utterance={"u0": (1.2, 4.8)},  # optional raw Whisper bounds
+    line_windows_by_utterance={"u0": (1.2, 4.8)},  # 任意のWhisper生区間
 )
 
 linked_document = run.document
@@ -49,8 +49,8 @@ realization = run.realization
 note_run_decision = run.note_run
 ```
 
-Automatic-transcription callers can recover the count of a Whisper-rounded
-vocalization from an independent acoustic pass:
+自動認識の呼び出し側は、Whisperが丸めた反復発声の回数を、独立した音響passから
+復元できます。
 
 ```python
 run = run_stage3_document(
@@ -65,62 +65,56 @@ run = run_stage3_document(
 )
 ```
 
-Whisper supplies the repeated mora identity; it does not supply the recovered
-count. The caller-provided re-attacks determine that count without a fixed cap.
-Overlapping SheetSage2 notes determine pitch and duration and are required to
-remain sung: notes between re-attacks become continuations rather than new
-consonants or discarded tail notes. Each inferred repetition retains its
-acoustic source and confidence as explicit evidence. Without re-attacks, normal
-lyrics and known-lyrics runs do not change.
+Whisperは反復するモーラの種類だけを供給し、復元後の回数は供給しません。呼び出し側が
+渡す再発音時刻から、固定上限を設けずに回数を決めます。重なるSheetSage2ノートは
+音高と長さを決め、歌唱されるノートとして必ず保持します。再発音の間にあるノートは、
+新しい子音や破棄される末尾ノートではなく、継続音になります。推定した各反復には、
+音響sourceと信頼度を明示的な根拠として残します。再発音時刻を渡さない場合、通常歌詞と
+既知歌詞の処理は変わりません。
 
-`run_stage3_document` validates the immutable observation document, partitions
-notes at the midpoint between neighboring utterance CTC ranges, runs the
-note-preserving decoder, materializes replayable links and derived note
-candidates, and compiles all links together. Existing links are rejected
-instead of being silently reused.
+`run_stage3_document`は変更不能な観測文書を検証し、隣接する発話のCTC範囲の中点で
+ノートを分割します。その後、ノートを保持するdecoderを一度実行し、再生可能なlinkと
+派生ノート候補を実体化して、すべてのlinkをまとめてcompileします。既存linkの黙示的な
+再利用は行わず、入力に含まれていれば拒否します。
 
-The score uses lyric onsets (normally raw mora CTC), selected-lyric segment
-identity, and pitched SheetSage2 intervals. Rounded-vocalization recovery uses
-caller-supplied acoustic re-attack onsets instead. Automatic-transcription
-callers may also supply the raw
-Whisper interval for every utterance. If an assigned note begins outside that
-interval while its mora CTC onset remains inside, the decoder adds one soft,
-quadratic line-ownership cost. A note beginning inside the interval keeps its
-complete tail even when it extends past the boundary; a CTC onset that also
-crosses the boundary supports the crossing without a confidence threshold.
-The score does not use reference/XF notes, F0, note confidence, or singing-unit
-intervals. Adjacent same-pitch fragments coalesce only inside one selected
-syllable; another CTC syllable keeps the boundary, and a pitch change becomes
-an explicit continuation slot. Unpitched candidates remain explicit `rest`
-links.
+scoreが使用するのは、歌詞の開始時刻（通常は生のモーラCTC）、選択した歌詞segmentの
+identity、音高付きSheetSage2区間です。反復発声の復元時だけ、呼び出し側が与えた再発音
+時刻を使います。自動認識の呼び出し側は、各発話のWhisper生区間も渡せます。割り当てた
+ノートが区間外から始まり、モーラCTC開始だけが区間内にある場合、decoderは小さな二次の
+行所有costを加えます。区間内から始まったノートは、末尾が境界を越えても全体を保持します。
+CTC開始も境界を越える場合は、信頼度の閾値なしで越境を支持します。
 
-## Correspondence and realization
+scoreは参照/XFノート、F0、ノート信頼度、歌唱単位区間を入力に使いません。同じ音高の
+隣接fragmentをまとめるのは、同じ選択済みsyllable内だけです。別のCTC syllableは境界を
+維持し、音高変化は明示的な継続slotになります。音高のない候補は明示的な`rest` linkとして
+残します。
 
-The linked output retains every raw SheetSage2 candidate unchanged. Coalesced
-or split final intervals are additional `NoteCandidate` values with
-`note-run-derivation` evidence naming their source candidates. This makes a
-saved linked document replayable through `compile_realization` without rerunning
-the optimizer.
+## 対応付けと歌唱実現
 
-`compile_realization` exposes three separate layers:
+対応付け済み出力は、すべての生SheetSage2候補を変更せず保持します。結合または分割した
+最終区間は、元候補を示す`note-run-derivation`根拠を持つ追加の`NoteCandidate`として
+保存します。そのため、保存した文書からoptimizerを再実行せず、`compile_realization`で
+同じ結果を再現できます。
 
-- `canonical`: complete surface text and stable mora IDs;
-- `performed`: observation state and selected correspondence;
-- `synthesis_plan`: pronunciation allocated to concrete note slots.
+`compile_realization`は、次の三つのlayerを分けて公開します。
 
-Missing correspondence never deletes canonical text. An actual performance
-omission requires an explicit `PerformanceOmission` backed by positive evidence.
+- `canonical`: 完全な表層テキストと安定したモーラID
+- `performed`: 観測状態と選択した対応付け
+- `synthesis_plan`: 具体的なノートslotへ割り当てた発音
 
-## Alternate correspondence model
+対応付けが欠けても、正規歌詞を削除しません。実際の歌唱省略には、正の根拠を持つ
+明示的な`PerformanceOmission`が必要です。
 
-`align_correspondence` and `run_correspondence_document` retain the earlier
-semi-Markov correspondence model for controlled comparisons. They are not
-called by `run_stage3_document` or by the Soramimic Video production bridge.
+## 別の対応付けmodel
 
-## Canonical JSON and CLI
+`align_correspondence`と`run_correspondence_document`は、比較用として以前の
+semi-Markov対応付けmodelを保持しています。本番の`run_stage3_document`および
+Soramimic Video bridgeからは呼び出しません。
 
-`ScoreDocument` is the single saved document. It wraps the linked observations
-and their compiled score so exporters and applications need only one input.
+## 正本JSONとCLI
+
+保存時の正本は、一つの`ScoreDocument`です。対応付け済み観測とcompile済みscoreを
+まとめるため、exporterやapplicationは一つの入力だけを扱えば済みます。
 
 ```python
 from soramimic_score import compile_score, dump, load
@@ -130,7 +124,7 @@ dump(score, "song.score.json")
 same_score = load("song.score.json")
 ```
 
-Decode a fresh observation document and save one score document:
+新しい観測文書をdecodeし、一つのscore文書として保存します。
 
 ```sh
 python -m soramimic_score \
@@ -138,7 +132,7 @@ python -m soramimic_score \
   --output work/song.score.json
 ```
 
-Compile an already linked observation document without decoding again:
+すでにlink済みの観測文書を、再decodeせずcompileすることもできます。
 
 ```sh
 python -m soramimic_score \
@@ -147,6 +141,4 @@ python -m soramimic_score \
   --output work/song.score.json
 ```
 
-The package has no model dependency and carries no audio, checkpoints, or song
-data. Experimental recognizers, alignment studies, and evaluation harnesses live
-under `research/`; they are not alternate production entry points.
+このパッケージはモデルに依存せず、音源、checkpoint、楽曲データを含みません。
