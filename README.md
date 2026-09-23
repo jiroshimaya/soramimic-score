@@ -9,6 +9,39 @@ Soramimic Scoreは、歌唱音源の認識結果を、持ち運び可能な一�
 各adapterは、今後このリポジトリへ順次移します。それまでは、呼び出し側が正規化した
 観測データを渡し、将来のend-to-end解析と同じJSON契約を受け取ります。
 
+## 処理パイプライン
+
+```mermaid
+flowchart TD
+    A["歌唱音源<br/>任意で正式歌詞"] --> B["音声の正規化・ボーカル分離"]
+    B --> C{"正式歌詞あり?"}
+    C -- あり --> D["正式歌詞の表層を固定"]
+    C -- なし --> E["Whisperで歌詞表層を自動認識"]
+    D --> F["読み候補生成<br/>KanaWhisperで再順位付け"]
+    E --> F
+    F --> G["ReazonSpeechかなCTCで<br/>モーラ時刻を整列"]
+    B --> H["SheetSage2で<br/>メロディノート候補を推定"]
+
+    subgraph CURRENT["soramimic-score 0.1（実装済み）"]
+        I["IntermediateRepresentation<br/>歌詞・モーラ・時刻・ノート候補・根拠"]
+        J["Stage 3<br/>モーラとノートの対応付け"]
+        K["対応linkと派生ノート候補を保存"]
+        L["canonical / performed / synthesis_plan<br/>をcompile"]
+        M["ScoreDocument<br/>song.score.json"]
+        I --> J --> K --> L --> M
+    end
+
+    G --> I
+    H --> I
+    M --> N["Soramimic Videoなどの利用application"]
+    M -.->|exporter追加予定| O["XF MIDI / MusicXML / SRT"]
+```
+
+音声の正規化からノート候補推定までは、現在Soramimic Videoが担当し、
+今後このリポジトリへ順次移します。実線は現在の処理経路、点線は今後
+追加する派生exporterを示します。JSONを正本とし、各出力形式はJSONから
+生成します。
+
 ```python
 from soramimic_score import compile_score, dump
 
