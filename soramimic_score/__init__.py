@@ -1,6 +1,7 @@
 """Portable, evidence-preserving contracts for Soramimic Score."""
 
 from .alignment import ObservedSingingUnit, build_known_lyrics_document
+from .models import ModelConfig
 from .audio import (
     AlignedMora,
     AudioAdapters,
@@ -69,6 +70,7 @@ from .vocalization import (
 )
 
 __all__ = [
+    "ModelConfig",
     "Boundary",
     "AlignedMora",
     "AudioAdapters",

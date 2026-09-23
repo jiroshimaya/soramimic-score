@@ -1,0 +1,190 @@
+import contextlib
+import importlib.util
+import io
+from pathlib import Path
+import sys
+import tempfile
+from types import SimpleNamespace
+import unittest
+from unittest.mock import patch
+
+from soramimic_score import ModelConfig, LyricLine, analyze_audio, load
+from soramimic_score.__main__ import analyze_main
+from soramimic_score.models import create_adapters, dictionary_readings, read_melody_lab
+from tests import test_audio_pipeline as fixtures
+
+
+class ModelTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.config = ModelConfig(self.root / "model", self.root / "base")
+        for folder in (self.config.sheetsage_model, self.config.sheetsage_base):
+            folder.mkdir()
+            for filename in ("config.json", "model.safetensors", "LICENSE"):
+                (folder / filename).touch()
+
+    def test_missing_local_models_fail_before_any_model_import(self):
+        (self.config.sheetsage_base / "LICENSE").unlink()
+        with self.assertRaisesRegex(ValueError, "LICENSE"):
+            create_adapters(self.config)
+
+    def test_lab_normalizes_overlap_and_preserves_pitch(self):
+        path = self.root / "melody.lab"
+        path.write_text("0.2\t0.5\t62\n0\t0.3\t60\n")
+        notes = read_melody_lab(path)
+        self.assertEqual([(n.start_sec, n.end_sec, n.midi_pitch) for n in notes],
+                         [(0, .2, 60), (.2, .5, 62)])
+        self.assertIsNone(notes[0].confidence)
+
+    def test_lab_rejects_nonfinite_pitch_and_simultaneous_conflicts(self):
+        path = self.root / "melody.lab"
+        for text in ("nan 1 60", "0 1 128", "0 1 60\n0 2 62", "1 0 60"):
+            with self.subTest(text=text):
+                path.write_text(text)
+                with self.assertRaises(ValueError):
+                    read_melody_lab(path)
+
+    def test_whisper_is_lazy_and_uses_singing_settings(self):
+        calls = []
+        class Whisper:
+            def __init__(self, name, **options):
+                calls.append((name, options))
+            def transcribe(self, path, **options):
+                calls.append((path, options))
+                return iter([SimpleNamespace(text=" あ ", start=0, end=1.2),
+                             SimpleNamespace(text="", start=1.2, end=2)]), SimpleNamespace(duration=1)
+        with patch.dict(sys.modules, {"faster_whisper": SimpleNamespace(WhisperModel=Whisper)}):
+            adapters = create_adapters(self.config)
+            self.assertEqual(calls, [])
+            with patch("soramimic_score.models._release"):
+                lines = adapters.lyric_recognizer(self.root / "audio.wav")
+        self.assertEqual(lines, (LyricLine("あ", 0, 1),))
+        self.assertFalse(calls[1][1]["vad_filter"])
+        self.assertFalse(calls[1][1]["condition_on_previous_text"])
+
+    @unittest.skipUnless(importlib.util.find_spec("MeCab"), "audio dependencies not installed")
+    def test_real_dictionary_pronunciation_and_unknown_words(self):
+        readings = dictionary_readings(None, [LyricLine("春が来た。")])
+        self.assertEqual(readings[0].kana, "ハルガキタ")
+        with self.assertRaises(ValueError):
+            dictionary_readings(None, [LyricLine("xyzzyqwerty")])
+
+    def test_cli_runs_configured_audio_pipeline_and_writes_loadable_json(self):
+        from soramimic_score import AudioAdapters
+        audio = self.root / "input.wav"
+        audio.touch()
+        output = self.root / "score.json"
+        adapters = AudioAdapters(
+            fixtures.AudioPipelineTests._readings, fixtures.AudioPipelineTests._moras,
+            fixtures.AudioPipelineTests._melody,
+            lambda path: (LyricLine("空", 0, .4), LyricLine("耳", .4, .8)),
+        )
+        with patch("soramimic_score.models.create_adapters", return_value=adapters) as factory:
+            with contextlib.redirect_stdout(io.StringIO()):
+                result = analyze_main([str(audio), "--output", str(output),
+                                       "--sheetsage-model", str(self.config.sheetsage_model),
+                                       "--sheetsage-base", str(self.config.sheetsage_base)])
+        self.assertEqual(result, 0)
+        self.assertEqual(factory.call_args.args[0], self.config)
+        self.assertEqual(load(output).score.canonical_text, "空\n耳")
+
+    def test_cli_failure_does_not_create_output(self):
+        output = self.root / "missing.json"
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as caught:
+            analyze_main([str(self.root / "absent.wav"), "--output", str(output),
+                          "--sheetsage-model", "missing", "--sheetsage-base", "missing"])
+        self.assertEqual(caught.exception.code, 1)
+        self.assertFalse(output.exists())
+
+    def test_cli_rejects_overwriting_audio(self):
+        audio = self.root / "input.wav"
+        audio.write_bytes(b"preserve me")
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            analyze_main([str(audio), "--output", str(audio),
+                          "--sheetsage-model", "missing", "--sheetsage-base", "missing"])
+        self.assertEqual(audio.read_bytes(), b"preserve me")
+
+    def test_model_configuration_and_custom_adapters_are_exclusive(self):
+        path = self.root / "input.wav"
+        path.touch()
+        with self.assertRaisesRegex(ValueError, "not both"):
+            analyze_audio(path, adapters=object(), model_config=self.config)
+
+    @unittest.skipUnless(importlib.util.find_spec("torch") and importlib.util.find_spec("librosa"),
+                         "audio dependencies not installed")
+    def test_ctc_inference_boundary_uses_real_forced_alignment(self):
+        import numpy as np
+        import soundfile as sf
+        import torch
+        from soramimic_score import ReadingSelection
+
+        path = self.root / "audio.wav"
+        sf.write(path, np.zeros(16000), 16000)
+        class Processor:
+            tokenizer = SimpleNamespace(get_vocab=lambda: {"<pad>": 0, "ア": 1, "あ": 2})
+            def __call__(self, samples, **kwargs):
+                return SimpleNamespace(input_values=torch.tensor(samples).unsqueeze(0))
+        class Model:
+            config = SimpleNamespace(conv_stride=[320], pad_token_id=0)
+            def eval(self):
+                return self
+            def to(self, device):
+                return self
+            def __call__(self, values):
+                logits = torch.full((1, values.shape[1] // 320, 3), -10.0)
+                logits[:, :, 0] = 0
+                # The second event uses a hiragana alias of the same target.
+                logits[0, 30, 1] = 10
+                logits[0, 40, 2] = 10
+                return SimpleNamespace(logits=logits)
+        with patch("transformers.AutoProcessor.from_pretrained", return_value=Processor()), \
+             patch("transformers.Wav2Vec2ForCTC.from_pretrained", return_value=Model()):
+            align = create_adapters(self.config).mora_aligner
+            readings = (ReadingSelection("アア", "test", 1),)
+            moras = align(path, (LyricLine("ああ", 0, 1),), readings)
+            self.assertEqual([m.kana for m in moras], ["ア", "ア"])
+            self.assertAlmostEqual(moras[0].start_sec, .1)
+            self.assertAlmostEqual(moras[1].start_sec, .3)
+            self.assertGreater(moras[1].confidence, .99)
+            known = align(path, (LyricLine("ああ"),), readings)
+            self.assertEqual(moras, known)
+            with self.assertRaisesRegex(ValueError, "frames"):
+                align(path, (LyricLine("ああ", 0, .02),), readings)
+
+            # A 20.5s clip places EOF in the first core's right context.
+            # The second core must not repeat those frames on the song clock.
+            sf.write(path, np.zeros(328000), 16000)
+            chunk_lengths = []
+            original_cat = torch.cat
+            def record_cat(chunks, *args, **kwargs):
+                chunk_lengths.extend(len(chunk) for chunk in chunks)
+                return original_cat(chunks, *args, **kwargs)
+            with patch("torch.cat", side_effect=record_cat):
+                align(path, (LyricLine("ああ", 0, 1),), readings)
+            self.assertEqual(chunk_lengths, [1000, 75])
+
+    @unittest.skipUnless(importlib.util.find_spec("torch") and importlib.util.find_spec("librosa"),
+                         "audio dependencies not installed")
+    def test_sheetsage_uses_local_models_and_parses_real_output_file(self):
+        import numpy as np
+        import soundfile as sf
+        path = self.root / "audio.wav"
+        sf.write(path, np.zeros(16000), 16000)
+        class Model:
+            def eval(self):
+                return self
+            def to(self, device):
+                return self
+            def transcribe(self, samples, **options):
+                self_options.update(options)
+                (Path(options["output_dir"]) / "melody_vocal.lab").write_text("0\t1\t60\n")
+        self_options = {}
+        with patch("transformers.AutoModel.from_pretrained", return_value=Model()) as loader:
+            notes = create_adapters(self.config).melody_transcriber(path)
+        self.assertTrue(loader.call_args.kwargs["local_files_only"])
+        self.assertEqual(loader.call_args.kwargs["base_model_path"], str(self.config.sheetsage_base))
+        self.assertTrue(self_options["melody_only"])
+        self.assertEqual(notes[0].midi_pitch, 60)
+        self.assertFalse(Path(self_options["output_dir"]).exists())
