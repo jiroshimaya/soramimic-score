@@ -130,92 +130,107 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None) -> 
             del model
             _release()
 
+    emission_cache = {}
+
     def align(path, lines, readings):
         logger.info("発音時刻を推定しています")
-        import librosa
-        import numpy as np
         import torch
         import torchaudio.functional as taf
-        from transformers import AutoProcessor, Wav2Vec2ForCTC
+        source = vocals_path or path
+        stat = source.stat()
+        source_key = (source.resolve(), stat.st_size, stat.st_mtime_ns)
+        if emission_cache.get("source_key") != source_key:
+            import librosa
+            import numpy as np
+            from transformers import AutoProcessor, Wav2Vec2ForCTC
 
-        audio, rate = librosa.load(str(vocals_path or path), sr=16000, mono=True)
-        if not len(audio) or not np.isfinite(audio).all():
-            raise ValueError("Audio must contain finite samples")
-        processor = AutoProcessor.from_pretrained(config.ctc_model,
-                                                  local_files_only=config.local_files_only)
-        model = Wav2Vec2ForCTC.from_pretrained(config.ctc_model,
-                                              local_files_only=config.local_files_only).eval().to(config.device)
-        try:
-            stride = math.prod(model.config.conv_stride)
-            padded = np.pad(audio, (8000, 8000))
-            logits = []
-            # Keep 20-second cores with two seconds of acoustic context at joins.
-            for pos in range(0, len(padded), 320000):
-                first, last = max(0, pos - 32000), min(len(padded), pos + 352000)
-                values = processor(padded[first:last], sampling_rate=rate,
-                                   return_tensors="pt").input_values.to(config.device)
-                with torch.inference_mode():
-                    chunk = model(values).logits[0].cpu()
-                lo = (pos - first) // stride
-                # Even when right context reaches EOF, keep only this core.
-                # Otherwise the final context is duplicated by the next core.
-                hi = min(len(chunk), lo + 320000 // stride)
-                logits.append(chunk[lo:hi])
-            probs = torch.log_softmax(torch.cat(logits), dim=-1)
-            vocab = processor.tokenizer.get_vocab()
-            blank = model.config.pad_token_id
-            # Both scripts denote the same acoustic token; combine their mass.
-            aliases = {}
-            for char, index in vocab.items():
-                normalized = katakana(char)
-                if len(normalized) == 1 and kana_to_moras(normalized):
-                    aliases.setdefault(normalized, []).append(index)
-            token_ids = {}
-            for char, indices in aliases.items():
-                target = vocab.get(char, indices[0])
-                combined = torch.logsumexp(probs[:, indices], dim=1)
-                probs[:, indices] = -torch.inf
-                probs[:, target] = combined
-                token_ids[char] = target
-            moras = [kana_to_moras(reading.kana) for reading in readings]
-            timed = all(line.start_sec is not None for line in lines)
-            groups = ([([index], line.start_sec, line.end_sec)
-                       for index, line in enumerate(lines)] if timed
-                      else [(list(range(len(lines))), 0.0, len(audio) / rate)])
-            output = []
-            for indices, start, end in groups:
-                lo = max(0, math.ceil((start + .5) * rate / stride - 1e-9))
-                hi = min(len(probs), math.ceil((end + .5) * rate / stride - 1e-9))
-                targets, owners = [], []
-                for li in indices:
-                    for mi, mora in enumerate(moras[li]):
-                        for char in mora:
-                            if char not in token_ids:
-                                raise ValueError(f"CTC vocabulary does not support {char!r}")
-                            targets.append(token_ids[char])
-                            owners.append((li, mi))
-                required = len(targets) + sum(a == b for a, b in zip(targets, targets[1:]))
-                if not targets or hi - lo < required:
-                    raise ValueError("Lyrics do not fit the available acoustic alignment frames")
-                alignment, scores = taf.forced_align(probs[lo:hi].unsqueeze(0).float(),
-                                                     torch.tensor([targets]), blank=blank)
-                spans = taf.merge_tokens(alignment[0], scores[0].exp(), blank=blank)
-                grouped = {}
-                for span, owner in zip(spans, owners, strict=True):
-                    grouped.setdefault(owner, []).append(span)
-                for (li, mi), spans in grouped.items():
-                    onset = max(start, (spans[0].start + lo) * stride / rate - .5)
-                    offset = min(end, (spans[-1].end + lo) * stride / rate - .5)
-                    if offset <= onset:
-                        raise ValueError("CTC produced an empty mora interval")
-                    confidence = min(float(span.score) for span in spans)
-                    output.append(AlignedMora(li, mi, moras[li][mi], onset, offset,
-                                              confidence, "reazon-kana-ctc" +
-                                              ("/demucs-htdemucs" if vocals_path else "")))
-            return tuple(output)
-        finally:
-            del model
-            _release()
+            audio, rate = librosa.load(str(source), sr=16000, mono=True)
+            if not len(audio) or not np.isfinite(audio).all():
+                raise ValueError("Audio must contain finite samples")
+            processor = AutoProcessor.from_pretrained(config.ctc_model,
+                                                      local_files_only=config.local_files_only)
+            model = Wav2Vec2ForCTC.from_pretrained(config.ctc_model,
+                                                  local_files_only=config.local_files_only).eval().to(config.device)
+            try:
+                stride = math.prod(model.config.conv_stride)
+                padded = np.pad(audio, (8000, 8000))
+                logits = []
+                # Keep 20-second cores with two seconds of acoustic context at joins.
+                for pos in range(0, len(padded), 320000):
+                    first, last = max(0, pos - 32000), min(len(padded), pos + 352000)
+                    values = processor(padded[first:last], sampling_rate=rate,
+                                       return_tensors="pt").input_values.to(config.device)
+                    with torch.inference_mode():
+                        chunk = model(values).logits[0].cpu()
+                    lo = (pos - first) // stride
+                    # Even when right context reaches EOF, keep only this core.
+                    # Otherwise the final context is duplicated by the next core.
+                    hi = min(len(chunk), lo + 320000 // stride)
+                    logits.append(chunk[lo:hi])
+                probs = torch.log_softmax(torch.cat(logits), dim=-1)
+                vocab = processor.tokenizer.get_vocab()
+                blank = model.config.pad_token_id
+                # Both scripts denote the same acoustic token; combine their mass.
+                aliases = {}
+                for char, index in vocab.items():
+                    normalized = katakana(char)
+                    if len(normalized) == 1 and kana_to_moras(normalized):
+                        aliases.setdefault(normalized, []).append(index)
+                token_ids = {}
+                for char, indices in aliases.items():
+                    target = vocab.get(char, indices[0])
+                    combined = torch.logsumexp(probs[:, indices], dim=1)
+                    probs[:, indices] = -torch.inf
+                    probs[:, target] = combined
+                    token_ids[char] = target
+            finally:
+                del model
+                _release()
+            emission_cache.clear()
+            emission_cache.update(source_key=source_key, probs=probs, rate=rate,
+                                  stride=stride, token_ids=token_ids, blank=blank,
+                                  duration=len(audio) / rate)
+        probs = emission_cache["probs"]
+        rate = emission_cache["rate"]
+        stride = emission_cache["stride"]
+        token_ids = emission_cache["token_ids"]
+        blank = emission_cache["blank"]
+        moras = [kana_to_moras(reading.kana) for reading in readings]
+        timed = all(line.start_sec is not None for line in lines)
+        groups = ([([index], line.start_sec, line.end_sec)
+                   for index, line in enumerate(lines)] if timed
+                  else [(list(range(len(lines))), 0.0, emission_cache["duration"])])
+        output = []
+        for indices, start, end in groups:
+            lo = max(0, math.ceil((start + .5) * rate / stride - 1e-9))
+            hi = min(len(probs), math.ceil((end + .5) * rate / stride - 1e-9))
+            targets, owners = [], []
+            for li in indices:
+                for mi, mora in enumerate(moras[li]):
+                    for char in mora:
+                        if char not in token_ids:
+                            raise ValueError(f"CTC vocabulary does not support {char!r}")
+                        targets.append(token_ids[char])
+                        owners.append((li, mi))
+            required = len(targets) + sum(a == b for a, b in zip(targets, targets[1:]))
+            if not targets or hi - lo < required:
+                raise ValueError("Lyrics do not fit the available acoustic alignment frames")
+            alignment, scores = taf.forced_align(probs[lo:hi].unsqueeze(0).float(),
+                                                 torch.tensor([targets]), blank=blank)
+            spans = taf.merge_tokens(alignment[0], scores[0].exp(), blank=blank)
+            grouped = {}
+            for span, owner in zip(spans, owners, strict=True):
+                grouped.setdefault(owner, []).append(span)
+            for (li, mi), spans in grouped.items():
+                onset = max(start, (spans[0].start + lo) * stride / rate - .5)
+                offset = min(end, (spans[-1].end + lo) * stride / rate - .5)
+                if offset <= onset:
+                    raise ValueError("CTC produced an empty mora interval")
+                confidence = min(float(span.score) for span in spans)
+                output.append(AlignedMora(li, mi, moras[li][mi], onset, offset,
+                                          confidence, "reazon-kana-ctc" +
+                                          ("/demucs-htdemucs" if vocals_path else "")))
+        return tuple(output)
 
     def melody(path):
         logger.info("音高を推定しています")
