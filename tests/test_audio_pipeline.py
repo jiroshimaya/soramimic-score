@@ -13,6 +13,7 @@ from soramimic_score import (
     build_audio_observations,
     lyric_surface,
 )
+from soramimic_score.audio import is_credit_hallucination
 
 
 class AudioPipelineTests(unittest.TestCase):
@@ -88,6 +89,32 @@ class AudioPipelineTests(unittest.TestCase):
             item.kind == "mora-ctc-anchor" and item.source == "test-ctc"
             for item in score.observations.evidence
         ))
+
+    def test_progress_reports_the_active_analysis_stage(self):
+        stages = []
+        adapters = AudioAdapters(self._readings, self._moras, self._melody,
+                                 lambda _: (LyricLine("空", 0, .4),))
+        analyze_audio(self.audio, adapters, on_progress=stages.append)
+        self.assertEqual(stages, ["歌詞を認識しています", "歌詞の読みを確認しています",
+                                  "モーラの時刻を推定しています", "音符と音高を推定しています",
+                                  "楽譜データを組み立てています"])
+
+    def test_credit_like_whisper_line_is_excluded_before_alignment(self):
+        self.assertTrue(is_credit_hallucination("作詞・作曲・編曲 初音ミク"))
+        self.assertTrue(is_credit_hallucination("字幕制作: Example"))
+        self.assertFalse(is_credit_hallucination("作曲家になりたい"))
+        aligned = []
+
+        def align(_path, lines, readings):
+            aligned.extend(line.text for line in lines)
+            return self._moras(_path, lines, readings)
+
+        adapters = AudioAdapters(self._readings, align, self._melody,
+                                 lambda _: (LyricLine("作詞・作曲・編曲 初音ミク", 0, .3),
+                                            LyricLine("空", .4, .8)))
+        score = analyze_audio(self.audio, adapters)
+        self.assertEqual(aligned, ["空"])
+        self.assertEqual(score.score.canonical_text, "空")
 
     def test_known_lyrics_run_recognition_and_preserve_acoustic_result(self):
         def reject(_path):

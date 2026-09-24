@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 import logging
@@ -10,8 +11,8 @@ import os
 import secrets
 import shutil
 import sqlite3
+from threading import Event, Thread
 import time
-import wave
 
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, Response
@@ -21,6 +22,7 @@ from .document import load
 from .exports import EXPORTS
 from .models import ModelConfig
 from .ir import has_usable_timing
+from .media import AUDIO_SUFFIXES, decode_audio, probe_audio
 
 
 MAX_WAV_BYTES = 100 * 1024 * 1024
@@ -32,19 +34,6 @@ logger = logging.getLogger(__name__)
 
 def _now_day() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
-
-
-def _validate_wav(path: Path) -> None:
-    try:
-        with wave.open(str(path), "rb") as audio:
-            if audio.getnchannels() not in (1, 2) or audio.getframerate() < 8000:
-                raise ValueError("対応形式は8 kHz以上のモノラル・ステレオWAVです")
-            if audio.getnframes() / audio.getframerate() > MAX_DURATION_SEC:
-                raise ValueError("音源は15分以内にしてください")
-            if audio.getnframes() == 0:
-                raise ValueError("空の音源です")
-    except (wave.Error, EOFError) as exc:
-        raise ValueError("PCM WAVを指定してください") from exc
 
 
 def _job_id(value: str) -> str:
@@ -70,7 +59,7 @@ def _request_ip(request: Request) -> str:
 def _prune(root: Path, db: Path) -> None:
     cutoff = datetime.fromtimestamp(time.time() - RETENTION_SEC, timezone.utc).isoformat()
     with sqlite3.connect(db) as conn:
-        old = conn.execute("SELECT id FROM jobs WHERE created<? AND state IN ('done','failed')",
+        old = conn.execute("SELECT id FROM jobs WHERE finished<? AND state IN ('done','failed')",
                            (cutoff,)).fetchall()
         conn.executemany("DELETE FROM jobs WHERE id=?", old)
         conn.execute("DELETE FROM quota WHERE day<?", (_now_day(),))
@@ -86,23 +75,63 @@ def create_app(*, data_root: Path | None = None, analyzer=None, public: bool | N
     db = root / "jobs.sqlite3"
     with sqlite3.connect(db) as conn:
         conn.execute("CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, state TEXT NOT NULL, "
-                     "error TEXT, created TEXT NOT NULL, ip TEXT NOT NULL)")
+                     "error TEXT, created TEXT NOT NULL, ip TEXT NOT NULL, "
+                     "stage TEXT, finished TEXT)")
+        if "stage" not in {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}:
+            conn.execute("ALTER TABLE jobs ADD COLUMN stage TEXT")
+        if "finished" not in {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}:
+            conn.execute("ALTER TABLE jobs ADD COLUMN finished TEXT")
+        for column in ("synth_state", "synth_stage", "synth_error"):
+            if column not in {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}:
+                conn.execute(f"ALTER TABLE jobs ADD COLUMN {column} TEXT")
         conn.execute("CREATE TABLE IF NOT EXISTS quota (day TEXT NOT NULL, ip TEXT NOT NULL, "
                      "used INTEGER NOT NULL, PRIMARY KEY(day, ip))")
         conn.execute("UPDATE jobs SET state='failed', error='処理が中断されました' "
                      "WHERE state IN ('queued', 'running')")
+        conn.execute("UPDATE jobs SET finished=COALESCE(finished, created) "
+                     "WHERE state IN ('done', 'failed')")
+        conn.execute("UPDATE jobs SET synth_state='failed', synth_error='合成が中断されました' "
+                     "WHERE synth_state IN ('queued', 'running')")
     db.chmod(0o600)
     is_public = public if public is not None else os.environ.get("SORAMIMIC_SCORE_PUBLIC") == "1"
     pool = ThreadPoolExecutor(max_workers=1)
-    app = FastAPI(title="Soramimic Score", docs_url=None, redoc_url=None, openapi_url=None)
+    synth_pool = ThreadPoolExecutor(max_workers=1)
+    stop_cleanup = Event()
 
-    def analyze(job: str, supplied: bool) -> None:
+    def cleanup_periodically() -> None:
+        while not stop_cleanup.is_set():
+            try:
+                _prune(root, db)
+            except Exception:
+                logger.exception("score cleanup failed")
+            stop_cleanup.wait(300)
+
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        cleaner = Thread(target=cleanup_periodically, daemon=True)
+        cleaner.start()
+        try:
+            yield
+        finally:
+            stop_cleanup.set()
+            cleaner.join(timeout=5)
+            pool.shutdown(wait=True)
+            synth_pool.shutdown(wait=True)
+
+    app = FastAPI(title="Soramimic Score", docs_url=None, redoc_url=None,
+                  openapi_url=None, lifespan=lifespan)
+
+    def analyze(job: str, supplied: bool, source_name: str) -> None:
         from .audio import analyze_audio
         from .document import dump
         job_dir = root / job
-        with sqlite3.connect(db) as conn:
-            conn.execute("UPDATE jobs SET state='running' WHERE id=?", (job,))
+        def progress(stage: str) -> None:
+            with sqlite3.connect(db) as conn:
+                conn.execute("UPDATE jobs SET state='running', stage=? WHERE id=?", (stage, job))
         try:
+            progress("音声を読み込んでいます")
+            decode_audio(job_dir / source_name, job_dir / "input.wav",
+                         max_duration=MAX_DURATION_SEC)
             config = ModelConfig(
                 sheetsage_model=Path(os.environ["SORAMIMIC_SCORE_SHEETSAGE_MODEL"]),
                 sheetsage_base=Path(os.environ["SORAMIMIC_SCORE_SHEETSAGE_BASE"]),
@@ -111,11 +140,17 @@ def create_app(*, data_root: Path | None = None, analyzer=None, public: bool | N
             )
             lyrics = tuple(line for line in (job_dir / "lyrics.txt").read_text(
                 encoding="utf-8").splitlines() if line.strip()) if supplied else None
-            result = (analyzer or analyze_audio)(job_dir / "input.wav", model_config=config,
-                                                 lyrics=lyrics)
+            if analyzer is None:
+                result = analyze_audio(job_dir / "input.wav", model_config=config,
+                                       lyrics=lyrics, on_progress=progress)
+            else:
+                progress("音源を解析しています")
+                result = analyzer(job_dir / "input.wav", model_config=config, lyrics=lyrics)
+            progress("書き出しを準備しています")
             dump(result, job_dir / "score.json")
             with sqlite3.connect(db) as conn:
-                conn.execute("UPDATE jobs SET state='done' WHERE id=?", (job,))
+                conn.execute("UPDATE jobs SET state='done', stage=NULL, finished=? WHERE id=?",
+                             (datetime.now(timezone.utc).isoformat(), job))
         except Exception as exc:
             logger.exception("score analysis failed for job %s", job)
             message = "解析に失敗しました。音源と設定を確認してください"
@@ -127,8 +162,37 @@ def create_app(*, data_root: Path | None = None, analyzer=None, public: bool | N
                 elif exc.stage == "lyrics" and "no lyric lines were produced" in str(exc):
                     message = "歌詞を認識できませんでした。歌声が聞こえる音源をお試しください"
             with sqlite3.connect(db) as conn:
-                conn.execute("UPDATE jobs SET state='failed', error=? WHERE id=?",
-                             (message, job))
+                conn.execute("UPDATE jobs SET state='failed', stage=NULL, error=?, finished=? "
+                             "WHERE id=?", (message, datetime.now(timezone.utc).isoformat(), job))
+
+    def resing(job: str) -> None:
+        from .resing import synthesize
+        from .audio import is_credit_hallucination
+        job_dir = root / job
+        output = job_dir / "resung.wav"
+        try:
+            document = load(job_dir / "score.json")
+            duration = probe_audio(job_dir / "input.wav", max_duration=MAX_DURATION_SEC)
+            excluded = (frozenset(line.utterance_id for line in document.score.canonical
+                                  if is_credit_hallucination(line.text))
+                        if not (job_dir / "lyrics.txt").exists() else frozenset())
+            def on_progress(done: int, total: int) -> None:
+                with sqlite3.connect(db) as conn:
+                    conn.execute("UPDATE jobs SET synth_state='running', synth_stage=? WHERE id=?",
+                                 (f"VOICEVOXで歌唱を合成中 ({done}/{total})", job))
+            synthesize(document, output,
+                       engine_url=os.environ.get("SORAMIMIC_SCORE_VOICEVOX_URL",
+                                                 "http://127.0.0.1:50021"),
+                       duration_sec=duration, on_progress=on_progress,
+                       excluded_utterance_ids=excluded)
+            with sqlite3.connect(db) as conn:
+                conn.execute("UPDATE jobs SET synth_state='done', synth_stage=NULL WHERE id=?", (job,))
+        except Exception:
+            logger.exception("score resinging failed for job %s", job)
+            output.unlink(missing_ok=True)
+            with sqlite3.connect(db) as conn:
+                conn.execute("UPDATE jobs SET synth_state='failed', synth_stage=NULL, "
+                             "synth_error='歌唱合成に失敗しました' WHERE id=?", (job,))
 
     @app.get("/healthz")
     def health():
@@ -138,17 +202,23 @@ def create_app(*, data_root: Path | None = None, analyzer=None, public: bool | N
     def home():
         return FileResponse(Path(__file__).with_name("score.html"), media_type="text/html")
 
+    @app.get("/guidelines", response_class=HTMLResponse)
+    def guidelines():
+        return FileResponse(Path(__file__).with_name("guidelines.html"), media_type="text/html")
+
     @app.post("/api/jobs")
     async def submit(request: Request, audio: UploadFile = File(...), lyrics: str = Form("")):
         _prune(root, db)
         if len(lyrics.encode("utf-8")) > 200_000:
             raise HTTPException(413, "歌詞が大きすぎます")
-        if not audio.filename or not audio.filename.lower().endswith(".wav"):
-            raise HTTPException(400, "WAVファイルを選んでください")
+        suffix = Path(audio.filename or "").suffix.lower()
+        if suffix not in AUDIO_SUFFIXES:
+            raise HTTPException(400, "MP3、M4A、WAVなどの音声ファイルを選んでください")
         job = secrets.token_hex(16)
         job_dir = root / job
         job_dir.mkdir(mode=0o700)
-        path = job_dir / "input.wav"
+        source_name = f"source{suffix}"
+        path = job_dir / source_name
         size = 0
         try:
             with path.open("wb") as output:
@@ -158,7 +228,7 @@ def create_app(*, data_root: Path | None = None, analyzer=None, public: bool | N
                         raise HTTPException(413, "WAVは100 MB以下にしてください")
                     output.write(chunk)
             try:
-                _validate_wav(path)
+                probe_audio(path, max_duration=MAX_DURATION_SEC)
             except ValueError as exc:
                 raise HTTPException(400, str(exc)) from exc
             if lyrics.strip():
@@ -174,10 +244,10 @@ def create_app(*, data_root: Path | None = None, analyzer=None, public: bool | N
                     conn.execute("INSERT INTO quota(day, ip, used) VALUES(?, ?, 1) "
                                  "ON CONFLICT(day, ip) DO UPDATE SET used=used+1",
                                  (_now_day(), ip))
-                conn.execute("INSERT INTO jobs(id,state,created,ip) VALUES(?,?,?,?)",
-                             (job, "queued", datetime.now(timezone.utc).isoformat(), ip))
+                conn.execute("INSERT INTO jobs(id,state,created,ip,stage) VALUES(?,?,?,?,?)",
+                             (job, "queued", datetime.now(timezone.utc).isoformat(), ip, None))
                 conn.commit()
-            pool.submit(analyze, job, bool(lyrics.strip()))
+            pool.submit(analyze, job, bool(lyrics.strip()), source_name)
         except Exception:
             if not path.exists() or not _known_job(db, job):
                 for item in job_dir.iterdir():
@@ -190,15 +260,20 @@ def create_app(*, data_root: Path | None = None, analyzer=None, public: bool | N
     def status(job: str):
         job = _job_id(job)
         with sqlite3.connect(db) as conn:
-            row = conn.execute("SELECT state,error FROM jobs WHERE id=?", (job,)).fetchone()
+            row = conn.execute("SELECT state,error,stage FROM jobs WHERE id=?", (job,)).fetchone()
         if not row:
             raise HTTPException(404)
-        return {"id": job, "state": row[0], "error": row[1]}
+        return {"id": job, "state": row[0], "error": row[1], "stage": row[2]}
 
     @app.get("/api/jobs/{job}/score")
     def score(job: str):
         document = _completed(root, db, _job_id(job))
-        slots = document.score.synthesis_plan
+        from .audio import is_credit_hallucination
+        excluded = (frozenset(line.utterance_id for line in document.score.canonical
+                              if is_credit_hallucination(line.text))
+                    if not (root / job / "lyrics.txt").exists() else frozenset())
+        slots = [slot for slot in document.score.synthesis_plan
+                 if slot.utterance_id not in excluded]
         units = {x.singing_unit_id: x for x in document.score.performed}
         observed = {x.id: x for x in document.observations.singing_units}
         moras = {x.id: x.text for x in document.observations.moras}
@@ -228,7 +303,8 @@ def create_app(*, data_root: Path | None = None, analyzer=None, public: bool | N
                                  "source": "aligned" if aligned else "estimated"})
         timeline.sort(key=lambda x: (x["start"], x["end"]))
         return {"lines": [{"id": line.utterance_id, "text": line.text,
-                           "kana": line.kana} for line in document.score.canonical],
+                           "kana": line.kana} for line in document.score.canonical
+                          if line.utterance_id not in excluded],
                 "notes": [{"start": s.start_sec, "end": s.end_sec, "pitch": s.midi_pitch,
                            "line": s.utterance_id, "kana": s.kana} for s in slots],
                 "moras": timeline}
@@ -236,7 +312,46 @@ def create_app(*, data_root: Path | None = None, analyzer=None, public: bool | N
     @app.get("/api/jobs/{job}/audio")
     def audio(job: str):
         _completed(root, db, _job_id(job))
+        source = next(root.joinpath(job).glob("source.*"), None)
+        if source is not None:
+            return FileResponse(source)
         return FileResponse(root / job / "input.wav", media_type="audio/wav")
+
+    @app.get("/api/jobs/{job}/audio-wav")
+    def audio_wav(job: str):
+        _completed(root, db, _job_id(job))
+        return FileResponse(root / job / "input.wav", media_type="audio/wav")
+
+    @app.post("/api/jobs/{job}/resing")
+    def start_resing(job: str):
+        job = _job_id(job)
+        _completed(root, db, job)
+        with sqlite3.connect(db) as conn:
+            state, error = conn.execute("SELECT synth_state,synth_error FROM jobs WHERE id=?",
+                                        (job,)).fetchone()
+            if state is None or (state == "failed" and error == "合成が中断されました"):
+                conn.execute("UPDATE jobs SET synth_state='queued', synth_stage='順番を待っています', "
+                             "synth_error=NULL WHERE id=?", (job,))
+                synth_pool.submit(resing, job)
+                state = "queued"
+        return {"state": state}
+
+    @app.get("/api/jobs/{job}/resing")
+    def resing_status(job: str):
+        job = _job_id(job)
+        _completed(root, db, job)
+        with sqlite3.connect(db) as conn:
+            row = conn.execute("SELECT synth_state,synth_stage,synth_error FROM jobs WHERE id=?",
+                               (job,)).fetchone()
+        return {"state": row[0], "stage": row[1], "error": row[2]}
+
+    @app.get("/api/jobs/{job}/resing/audio")
+    def resing_audio(job: str):
+        job = _job_id(job)
+        status = resing_status(job)
+        if status["state"] != "done":
+            raise HTTPException(409, "歌唱合成が完了していません")
+        return FileResponse(root / job / "resung.wav", media_type="audio/wav")
 
     @app.get("/api/jobs/{job}/download/{format}")
     def download(job: str, format: str):

@@ -40,7 +40,7 @@ audio = [
 packages = ["soramimic_score"]
 
 [tool.setuptools.package-data]
-soramimic_score = ["score.html"]
+soramimic_score = ["score.html", "guidelines.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

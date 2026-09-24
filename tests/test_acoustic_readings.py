@@ -74,7 +74,10 @@ class PreparedAudioTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.root = Path(self.temp.name)
         self.audio = self.root / "input.wav"
-        self.audio.touch()
+        import wave
+        with wave.open(str(self.audio), "wb") as wav:
+            wav.setnchannels(1); wav.setsampwidth(2); wav.setframerate(16000)
+            wav.writeframes(b"\0\0" * 1600)
         self.config = ModelConfig(self.root / "model", self.root / "base")
         for folder in (self.config.sheetsage_model, self.config.sheetsage_base):
             folder.mkdir()

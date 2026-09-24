@@ -1,4 +1,8 @@
 import io
+from threading import Event
+import shutil
+import sqlite3
+import subprocess
 import tempfile
 import time
 import unittest
@@ -11,7 +15,7 @@ from xml.etree import ElementTree
 from fastapi.testclient import TestClient
 
 from soramimic_score.audio import AudioPipelineError
-from soramimic_score.web import create_app
+from soramimic_score.web import _prune, create_app
 from soramimic_score.exports import export_musicxml
 from tests.test_document import ScoreDocumentTests
 
@@ -81,6 +85,89 @@ class ScoreWebTests(unittest.TestCase):
                                         "SORAMIMIC_SCORE_SHEETSAGE_BASE": "b"}):
                 self.assertEqual(self.submit().status_code, 200)
                 self.assertEqual(self.submit().status_code, 429)
+
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg is required")
+    def test_mp3_upload_is_decoded_before_analysis(self):
+        encoded = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-f", "wav",
+                                  "-i", "pipe:0", "-f", "mp3", "pipe:1"],
+                                 input=wav_bytes(), capture_output=True, check=True).stdout
+        with patch.dict("os.environ", {"SORAMIMIC_SCORE_SHEETSAGE_MODEL": "a",
+                                    "SORAMIMIC_SCORE_SHEETSAGE_BASE": "b"}):
+            response = self.client.post("/api/jobs",
+                                        files={"audio": ("song.mp3", encoded, "audio/mpeg")})
+            self.assertEqual(response.status_code, 200)
+            job = response.json()["id"]
+            for _ in range(100):
+                state = self.client.get(f"/api/jobs/{job}").json()["state"]
+                if state in ("done", "failed"):
+                    break
+                time.sleep(.02)
+            self.assertEqual(state, "done")
+        self.assertEqual(self.client.get(f"/api/jobs/{job}/audio").status_code, 200)
+        self.assertTrue(self.client.get(f"/api/jobs/{job}/audio-wav").content.startswith(b"RIFF"))
+
+    def test_running_stage_is_visible(self):
+        started, release = Event(), Event()
+        def slow_analyzer(*args, **kwargs):
+            started.set()
+            release.wait(5)
+            return self.document
+        with tempfile.TemporaryDirectory() as directory:
+            with TestClient(create_app(data_root=Path(directory),
+                                       analyzer=slow_analyzer)) as client:
+                with patch.dict("os.environ", {"SORAMIMIC_SCORE_SHEETSAGE_MODEL": "a",
+                                            "SORAMIMIC_SCORE_SHEETSAGE_BASE": "b"}):
+                    job = client.post("/api/jobs", files={"audio": ("song.wav", wav_bytes())}).json()["id"]
+                    self.assertTrue(started.wait(5))
+                    state = client.get(f"/api/jobs/{job}").json()
+                    self.assertEqual(state["state"], "running")
+                    self.assertEqual(state["stage"], "音源を解析しています")
+                    release.set()
+
+    def test_resinging_is_started_only_by_request(self):
+        with patch.dict("os.environ", {"SORAMIMIC_SCORE_SHEETSAGE_MODEL": "a",
+                                    "SORAMIMIC_SCORE_SHEETSAGE_BASE": "b"}):
+            job = self.submit().json()["id"]
+            for _ in range(100):
+                if self.client.get(f"/api/jobs/{job}").json()["state"] == "done":
+                    break
+                time.sleep(.02)
+        self.assertIsNone(self.client.get(f"/api/jobs/{job}/resing").json()["state"])
+        def synthesize(_document, output, **kwargs):
+            output.write_bytes(wav_bytes())
+            kwargs["on_progress"](1, 1)
+        with patch("soramimic_score.resing.synthesize", side_effect=synthesize):
+            self.assertEqual(self.client.post(f"/api/jobs/{job}/resing").status_code, 200)
+            for _ in range(100):
+                state = self.client.get(f"/api/jobs/{job}/resing").json()["state"]
+                if state == "done":
+                    break
+                time.sleep(.02)
+            self.assertEqual(state, "done")
+            self.assertTrue(self.client.get(f"/api/jobs/{job}/resing/audio").content.startswith(b"RIFF"))
+
+    def test_guidelines_explain_retention(self):
+        response = self.client.get("/guidelines")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("約24時間", response.text)
+
+    def test_expired_result_and_audio_are_removed(self):
+        with patch.dict("os.environ", {"SORAMIMIC_SCORE_SHEETSAGE_MODEL": "a",
+                                    "SORAMIMIC_SCORE_SHEETSAGE_BASE": "b"}):
+            job = self.submit().json()["id"]
+            for _ in range(100):
+                if self.client.get(f"/api/jobs/{job}").json()["state"] == "done":
+                    break
+                time.sleep(.02)
+        self.assertEqual(self.client.get(f"/api/jobs/{job}").json()["state"], "done")
+        root = Path(self.temporary.name)
+        db = root / "jobs.sqlite3"
+        with sqlite3.connect(db) as connection:
+            connection.execute("UPDATE jobs SET finished='2000-01-01T00:00:00+00:00' "
+                               "WHERE id=?", (job,))
+        _prune(root, db)
+        self.assertFalse((root / job).exists())
+        self.assertEqual(self.client.get(f"/api/jobs/{job}/audio").status_code, 404)
 
     def test_private_job_requires_unguessable_id(self):
         self.assertEqual(self.client.get("/api/jobs/missing").status_code, 404)
