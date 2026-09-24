@@ -24,6 +24,7 @@ from .japanese import LyricSpan, ReadingCandidate, kana_to_moras
 from .line_windows import snap_line_windows_to_rests
 from .local_recovery import (coalesce_repeated_suffix_fragments, deficit_windows,
                              expand_repeated_vocalization_from_kana,
+                             is_pathological_repeated_vocalization,
                              repeated_vocalization_period, uncovered_note_windows)
 from .note_runs import NoteRunConfig
 from .semantic import credit_recovery_windows, has_melodic_support, is_credit_hallucination
@@ -384,6 +385,13 @@ def analyze_audio(
     semantic_evidence = []
     supplied_surfaces = {strip_ruby(text).strip() for text in lyrics or ()}
     for index, line in enumerate(raw_recognized):
+        if (lyrics is None and is_pathological_repeated_vocalization(line, notes)):
+            semantic_evidence.append(Evidence(
+                f"audio-repetition-runaway-{index}", "soramimic_score.local_recovery",
+                "lyric-repetition-rejection", 0.0,
+                {"source_segment_index": index, "surface": line.text},
+            ))
+            continue
         if not is_credit_hallucination(line.text) or line.text.strip() in supplied_surfaces:
             recognized_lines.append(line)
             continue
@@ -404,6 +412,7 @@ def analyze_audio(
                                  and candidate.end_sec is not None
                                  and start <= candidate.start_sec < candidate.end_sec <= end
                                  and not is_credit_hallucination(candidate.text)
+                                 and not is_pathological_repeated_vocalization(candidate, notes)
                                  and has_melodic_support(candidate, notes))
         recognized_lines.extend(recovered)
         semantic_evidence.append(Evidence(
@@ -472,6 +481,7 @@ def analyze_audio(
                          if candidate.start_sec is not None and candidate.end_sec is not None
                          and start <= candidate.start_sec < candidate.end_sec <= end
                          and not is_credit_hallucination(candidate.text)
+                         and not is_pathological_repeated_vocalization(candidate, notes)
                          and has_melodic_support(candidate, notes))
 
         if on_progress:
