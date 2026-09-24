@@ -11,8 +11,6 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 import math
-import re
-import unicodedata
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -23,6 +21,7 @@ from .alignment import ObservedSingingUnit, build_known_lyrics_document
 from .document import ScoreDocument, compile_score
 from .ir import Boundary, Evidence, IntermediateRepresentation, NoteCandidate
 from .japanese import LyricSpan, ReadingCandidate, kana_to_moras
+from .semantic import credit_recovery_windows, has_melodic_support, is_credit_hallucination
 
 
 @dataclass(frozen=True)
@@ -78,16 +77,18 @@ MoraAligner = Callable[
     Sequence[AlignedMora],
 ]
 MelodyTranscriber = Callable[[Path], Sequence[MelodyNote]]
+LyricRecoverer = Callable[[Path, float, float], Sequence[LyricLine]]
 
 
 @dataclass(frozen=True)
 class AudioAdapters:
-    """The four model boundaries needed by the audio pipeline.
+    """Model boundaries needed by the audio pipeline.
 
     ``lyric_recognizer`` is required by the ASR-first audio pipeline.
     ``lyric_reading`` optionally supplies linguistic readings for whole-line
-    comparison (otherwise normalized surface text is used). The other adapters
-    are required in both modes.
+    comparison (otherwise normalized surface text is used). ``lyric_recoverer``
+    can retry one singing window when Whisper emits a credit template. The
+    reading, mora, and melody adapters are required in both modes.
     """
 
     reading_selector: ReadingSelector
@@ -95,6 +96,7 @@ class AudioAdapters:
     melody_transcriber: MelodyTranscriber
     lyric_recognizer: LyricRecognizer | None = None
     lyric_reading: Callable[[str], str] | None = None
+    lyric_recoverer: LyricRecoverer | None = None
 
 
 class AudioPipelineError(RuntimeError):
@@ -103,23 +105,6 @@ class AudioPipelineError(RuntimeError):
     def __init__(self, stage: str, detail: str):
         self.stage = stage
         super().__init__(f"{stage}: {detail}")
-
-
-_CREDIT_ROLE = re.compile(r"作詞|作曲|編曲|歌唱|ボーカル|lyrics|music|arrangement|vocal", re.I)
-_CREDIT_PREFIX = re.compile(
-    r"^(?:字幕(?:制作|製作|提供|翻訳)|翻訳[・/ ]?字幕|subtitles?\s+by|"
-    r"(?:作詞|作曲|編曲|歌唱|ボーカル|lyrics|music|arrangement|vocal)\s*[:：])",
-    re.I,
-)
-
-
-def is_credit_hallucination(text: str) -> bool:
-    """Recognize credit-like ASR lines without censoring ordinary lyric words."""
-    value = unicodedata.normalize("NFKC", text).strip()
-    if _CREDIT_PREFIX.search(value):
-        return True
-    roles = {match.group().lower() for match in _CREDIT_ROLE.finditer(value)}
-    return len(roles) >= 2 and bool(re.search(r"[・/&]|\s", value))
 
 
 def _run_adapter(stage: str, adapter: Callable[..., Sequence[object]], *args: object):
@@ -377,10 +362,48 @@ def analyze_audio(
         raise AudioPipelineError("lyrics", "ASR-first analysis requires a recognizer")
     if on_progress:
         on_progress("歌詞を認識しています")
-    recognized = _validate_lines(
-        tuple(line for line in _run_adapter("lyrics", adapters.lyric_recognizer, path)
-              if not is_credit_hallucination(line.text)), timed=True,
+    raw_recognized = _validate_lines(
+        _run_adapter("lyrics", adapters.lyric_recognizer, path), timed=True,
     )
+    if on_progress:
+        on_progress("音符と音高を推定しています")
+    notes = _validate_notes(_run_adapter("melody", adapters.melody_transcriber, path))
+    recognized_lines = []
+    semantic_evidence = []
+    supplied_surfaces = {strip_ruby(text).strip() for text in lyrics or ()}
+    for index, line in enumerate(raw_recognized):
+        if not is_credit_hallucination(line.text) or line.text.strip() in supplied_surfaces:
+            recognized_lines.append(line)
+            continue
+        windows = credit_recovery_windows(line, notes)
+        recovered = []
+        if windows and adapters.lyric_recoverer is not None:
+            if on_progress:
+                on_progress("歌詞の誤認識区間を再確認しています")
+            for start, end in windows:
+                try:
+                    candidates = _validate_lines(
+                        adapters.lyric_recoverer(path, start, end), timed=True,
+                    )
+                except Exception:
+                    continue
+                recovered.extend(candidate for candidate in candidates
+                                 if candidate.start_sec is not None
+                                 and candidate.end_sec is not None
+                                 and start <= candidate.start_sec < candidate.end_sec <= end
+                                 and not is_credit_hallucination(candidate.text)
+                                 and has_melodic_support(candidate, notes))
+        recognized_lines.extend(recovered)
+        semantic_evidence.append(Evidence(
+            f"audio-credit-gate-{index}", "soramimic_score.semantic",
+            "lyric-semantic-gate", 0.0,
+            {"source_segment_index": index, "surface": line.text,
+             "status": "recovered" if recovered else "rejected",
+             "recovery_windows": [list(window) for window in windows],
+             "recovered_count": len(recovered)},
+        ))
+    recognized_lines.sort(key=lambda item: (item.start_sec, item.end_sec))
+    recognized = _validate_lines(recognized_lines, timed=True)
     adjustment, overlay = None, None
     lines = recognized
     if lyrics is not None:
@@ -427,11 +450,11 @@ def analyze_audio(
         readings, _run_adapter("mora alignment", adapters.mora_aligner, path, lines, readings),
     )
     if on_progress:
-        on_progress("音符と音高を推定しています")
-    notes = _validate_notes(_run_adapter("melody", adapters.melody_transcriber, path))
-    if on_progress:
         on_progress("楽譜データを組み立てています")
     observations = build_audio_observations(lines, readings, moras, notes)
+    if semantic_evidence:
+        observations = replace(observations,
+                               evidence=observations.evidence + tuple(semantic_evidence))
     if adjustment is not None:
         observations = replace(observations, evidence=observations.evidence + (Evidence(
             "audio-lyric-adjustment", "soramimic_score.lyrics", "lyric-adjustment", 0.0,
