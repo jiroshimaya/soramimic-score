@@ -74,7 +74,8 @@ def analyze_main(argv) -> int:
                              acoustic_readings=not args.dictionary_readings,
                              demucs_checkpoint=args.demucs_checkpoint, kana_model=args.kana_model)
         score = analyze_audio(args.audio, model_config=config, lyrics=lyrics,
-                              adjust_lyrics=args.adjust_lyrics)
+                              adjust_lyrics=args.adjust_lyrics,
+                              on_progress=lambda stage: print(stage, file=sys.stderr, flush=True))
         dump(score, args.output)
     except (ImportError, OSError, ValueError, RuntimeError) as exc:
         parser.exit(1, f"解析に失敗しました: {exc}\n")

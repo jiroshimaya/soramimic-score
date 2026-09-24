@@ -63,14 +63,18 @@ def read_melody_lab(path: Path) -> tuple[MelodyNote, ...]:
 
 
 @contextmanager
-def prepared_adapters(path: Path, config: ModelConfig):
+def prepared_adapters(path: Path, config: ModelConfig, *, accompaniment_path: Path | None = None):
     """Keep a private temporary vocal stem alive for exactly one analysis."""
     config.validate()
     with tempfile.TemporaryDirectory(prefix="soramimic-score-vocals-") as directory:
         vocals = None
         if config.separate_vocals:
             vocals = Path(directory) / "vocals.wav"
-            _run_adapter("vocal separation", separate_vocals, path, vocals, config)
+            if accompaniment_path is None:
+                _run_adapter("vocal separation", separate_vocals, path, vocals, config)
+            else:
+                _run_adapter("vocal separation", separate_vocals, path, vocals, config,
+                             accompaniment_path)
         yield create_adapters(config, vocals_path=vocals)
 
 

@@ -1,15 +1,35 @@
 import io
+import shutil
+import struct
 import tempfile
 import unittest
 import wave
 from pathlib import Path
 from unittest.mock import patch
 
-from soramimic_score.resing import _score_for_slots, synthesize
+from soramimic_score.resing import _score_for_slots, mix_accompaniment, synthesize
 from tests.test_document import ScoreDocumentTests
 
 
 class ResingTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg is required")
+    def test_separated_accompaniment_is_mixed_with_synthesized_voice(self):
+        with tempfile.TemporaryDirectory() as directory:
+            voice = Path(directory) / "voice.wav"
+            backing = Path(directory) / "backing.wav"
+            for path, value in ((voice, 1000), (backing, 1000)):
+                with wave.open(str(path), "wb") as wav:
+                    wav.setnchannels(1)
+                    wav.setsampwidth(2)
+                    wav.setframerate(24000)
+                    wav.writeframes(struct.pack("<h", value) * 2400)
+            mix_accompaniment(voice, backing)
+            with wave.open(str(voice)) as wav:
+                samples = struct.unpack("<2400h", wav.readframes(2400))
+            self.assertEqual(len(samples), 2400)
+            self.assertGreater(max(samples), 1600)
+            self.assertLess(max(samples), 1800)
+
     def test_score_has_lead_rest_and_mora_lyrics(self):
         slots = ScoreDocumentTests().score_document().score.synthesis_plan
         score = _score_for_slots(list(slots), 0)

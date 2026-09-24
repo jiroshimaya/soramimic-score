@@ -36,7 +36,7 @@ def _demucs_package(config):
                                                weights_only=False)
 
 
-def separate_vocals(path, output, config):
+def separate_vocals(path, output, config, accompaniment=None):
     import librosa
     import numpy as np
     import soundfile as sf
@@ -67,6 +67,9 @@ def separate_vocals(path, output, config):
             raise ValueError("Vocal separation must preserve audio length and finite samples")
         # Float WAV avoids clipping/renormalizing the isolated voice.
         sf.write(str(output), vocals.T, rate, subtype="FLOAT")
+        if accompaniment is not None:
+            sf.write(str(accompaniment), (samples - vocals).T, rate,
+                     format="FLAC", subtype="PCM_16")
     finally:
         del model
         release_memory()
