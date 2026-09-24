@@ -233,3 +233,48 @@ def uncovered_note_windows(lines: Sequence[LyricLine], notes: Sequence[MelodyNot
                      and line.start_sec >= end), default=end + .3)
         windows.append((max(left, start - .3), min(right, end + .3)))
     return tuple(windows[:4])
+
+
+def unowned_note_windows(document, lines: Sequence[LyricLine]
+                         ) -> tuple[tuple[float, float, int], ...]:
+    """Find long lyric-free runs from Stage 3 note ownership, as Video does."""
+    notes_by_id = {note.id: note for note in document.note_candidates}
+    unowned_ids = {note_id for link in document.links
+                   if link.operation == "note_only" and not link.singing_unit_ids
+                   for note_id in link.note_candidate_ids}
+    unowned = sorted((notes_by_id[note_id] for note_id in unowned_ids
+                      if note_id in notes_by_id),
+                     key=lambda note: (note.start_sec, note.end_sec, note.id))
+    unowned = [note for note in unowned if not any(
+        line.start_sec is not None and line.end_sec is not None
+        and line.start_sec < note.end_sec and line.end_sec > note.start_sec
+        for line in lines)]
+    clusters = []
+    for note in unowned:
+        crosses_line = bool(clusters) and any(
+            line.start_sec is not None and line.end_sec is not None
+            and line.start_sec < note.start_sec
+            and line.end_sec > clusters[-1][-1].end_sec for line in lines)
+        if not clusters or note.start_sec - clusters[-1][-1].end_sec > .32 or crosses_line:
+            clusters.append([note])
+        else:
+            clusters[-1].append(note)
+    seeds = [cluster for cluster in clusters if len(cluster) >= 4
+             and cluster[-1].end_sec - cluster[0].start_sec >= .6]
+    merged = []
+    for seed in seeds:
+        start = merged[-1][0].start_sec if merged else seed[0].start_sec
+        crosses_line = any(line.start_sec is not None and line.end_sec is not None
+                           and line.start_sec < seed[-1].end_sec
+                           and line.end_sec > start for line in lines)
+        if not merged or seed[0].start_sec - merged[-1][-1].end_sec > 2 or crosses_line:
+            merged.append(list(seed))
+        else:
+            merged[-1].extend(seed)
+    windows = []
+    for group in merged:
+        start, end = group[0].start_sec, group[-1].end_sec
+        count = sum(note.start_sec >= start and note.end_sec <= end for note in unowned)
+        if count >= 8 and end - start >= 4:
+            windows.append((start, end, count))
+    return tuple(windows)
