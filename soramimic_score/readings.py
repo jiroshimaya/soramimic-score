@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import csv
+from dataclasses import replace
+from itertools import islice, product
 import math
 from threading import Lock
+import unicodedata
 
 from .audio import ReadingSelection
-from .japanese import kana_to_moras, katakana, mora_distance, mora_vowel
+from .japanese import _RUBY, kana_to_moras, katakana, mora_distance, mora_vowel
 
 
 _YOMI_LOCK = Lock()
@@ -68,6 +71,27 @@ def dictionary_readings(_path, lines):
 
     output = []
     for line in lines:
+        if _RUBY.search(line.text):
+            parts = []
+            cursor = 0
+            for match in [*_RUBY.finditer(line.text), None]:
+                end = match.start() if match is not None else len(line.text)
+                plain = line.text[cursor:end]
+                if any(not c.isspace() and unicodedata.category(c)[0] not in "PZC"
+                       for c in plain):
+                    parts.append(dictionary_readings(_path, (replace(line, text=plain),))[0].candidates)
+                if match is not None:
+                    kana = katakana(match[2])
+                    if not kana or "".join(kana_to_moras(kana)) != kana:
+                        raise ValueError("Explicit ruby must contain a kana pronunciation")
+                    parts.append((kana,))
+                    cursor = match.end()
+            # Bound the combinatorial generator by order, never by mora count.
+            candidates = tuple(dict.fromkeys("".join(row) for row in islice(product(*parts), 32)))
+            output.append(ReadingSelection(candidates[0], "explicit-ruby", 1.0, candidates, {
+                "reason": "supplied-ruby", "confidence_available": False,
+            }))
+            continue
         provenance = {}
         # Yomi initializes a process-wide OpenJTalk user dictionary lazily.
         with _YOMI_LOCK:

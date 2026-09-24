@@ -66,6 +66,20 @@ class YomiReadingsTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "Neither"):
                 dictionary_readings(None, (LyricLine("…"),))
 
+    def test_explicit_ruby_excludes_other_pronunciations(self):
+        selection, = dictionary_readings(None, (LyricLine("｜明日《あした》"),))
+        self.assertEqual(selection.candidates, ("アシタ",))
+        self.yomi.assert_not_called()
+
+    def test_partial_ruby_keeps_ambiguity_only_in_unannotated_text(self):
+        with patch("soramimic_score.readings.dictionary_candidates", return_value=(("アス",),)):
+            selection, = dictionary_readings(None, (LyricLine("明日｜空《そら》"),))
+        self.assertEqual(selection.candidates, ("アスソラ", "アシタソラ"))
+
+    def test_ruby_rejects_non_kana(self):
+        with self.assertRaisesRegex(ValueError, "kana pronunciation"):
+            dictionary_readings(None, (LyricLine("｜空《sky》"),))
+
     def test_yomi_failure_is_not_silently_replaced_by_unidic(self):
         self.yomi.side_effect = RuntimeError("engine failed")
         with patch("soramimic_score.readings.dictionary_candidates") as unidic:
