@@ -1,4 +1,5 @@
 import tempfile
+import importlib.util
 import unittest
 from pathlib import Path
 
@@ -14,7 +15,10 @@ from soramimic_score import (
     lyric_surface,
 )
 from soramimic_score.audio import is_credit_hallucination
-from soramimic_score.semantic import credit_recovery_windows
+from soramimic_score.semantic import (contextual_non_lyric_template_families,
+                                      credit_recovery_windows,
+                                      non_lyric_template_family)
+from soramimic_score.vocal_activity import VocalActivity
 
 
 class AudioPipelineTests(unittest.TestCase):
@@ -116,6 +120,64 @@ class AudioPipelineTests(unittest.TestCase):
         score = analyze_audio(self.audio, adapters)
         self.assertEqual(aligned, ["空"])
         self.assertEqual(score.score.canonical_text, "空")
+
+    def test_contextual_credit_block_matches_video_gate(self):
+        lines = (LyricLine("歌 ABC Studio", 0, .2),
+                 LyricLine("映像 ABC Studio", .2, .4),
+                 LyricLine("空", .4, .8),
+                 LyricLine("歌 ABC Studio", 1, 1.2))
+        self.assertEqual(contextual_non_lyric_template_families(lines),
+                         ("credits", "credits", None, None))
+        score = analyze_audio(self.audio, AudioAdapters(
+            self._readings, self._moras, self._melody, lambda _: lines[:3]))
+        self.assertEqual(score.score.canonical_text, "空")
+
+    @unittest.skipUnless(importlib.util.find_spec("MeCab") and
+                         importlib.util.find_spec("unidic_lite"), "Japanese entity tagger unavailable")
+    def test_japanese_creator_name_is_a_contextual_credit(self):
+        lines = (LyricLine("歌 初音ミク", 0, .2), LyricLine("映像 初音ミク", .2, .4))
+        self.assertEqual(contextual_non_lyric_template_families(lines),
+                         ("credits", "credits"))
+
+    def test_soft_template_requires_its_own_ctc_support(self):
+        self.assertEqual(non_lyric_template_family("お疲れさま"), "closing-greeting")
+        lines = (LyricLine("お疲れさま", 0, .4), LyricLine("空", .4, .8))
+        passes = []
+        low_score = True
+
+        def readings(_path, chosen):
+            return tuple(ReadingSelection("オツカレサマ" if line.text == "お疲れさま" else "ソラ",
+                                          "test", 1) for line in chosen)
+
+        def align(_path, chosen, selected):
+            passes.append(tuple(line.text for line in chosen))
+            return tuple(AlignedMora(index, offset, kana,
+                                     line.start_sec + offset * .03,
+                                     line.start_sec + (offset + 1) * .03,
+                                     .0001 if low_score and line.text == "お疲れさま" else .8)
+                         for index, (line, reading) in enumerate(zip(chosen, selected))
+                         for offset, kana in enumerate(reading.kana))
+
+        score = analyze_audio(self.audio, AudioAdapters(
+            readings, align, self._melody, lambda _: lines))
+        self.assertEqual(passes, [("お疲れさま", "空"), ("空",)])
+        self.assertEqual(score.score.canonical_text, "空")
+        low_score = False
+        supported = analyze_audio(self.audio, AudioAdapters(
+            readings, align, self._melody, lambda _: lines))
+        self.assertEqual(supported.score.canonical_text, "お疲れさま\n空")
+
+    def test_silent_vocal_stem_rejects_unresolved_whisper_line(self):
+        lines = (LyricLine("空", 0, .4), LyricLine("何もない", 1, 2))
+        activity = (VocalActivity(-15, 0, 1, True),
+                    VocalActivity(-90, -75, 0, False))
+        score = analyze_audio(self.audio, AudioAdapters(
+            self._readings, self._moras, self._melody, lambda _: lines,
+            vocal_activity=lambda _path, windows: activity))
+        self.assertEqual(score.score.canonical_text, "空")
+        self.assertTrue(any(item.kind == "lyric-semantic-gate"
+                            and item.detail.get("vocal_activity_relative_db") == -75
+                            for item in score.observations.evidence))
 
     def test_credit_gate_recovers_singing_island_by_short_whisper_retry(self):
         self.assertFalse(is_credit_hallucination("作詞・作曲・君へ歌う"))

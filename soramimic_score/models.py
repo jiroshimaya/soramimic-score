@@ -288,6 +288,10 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None) -> 
         source = vocals_path or path
         return transcribe_kana_views({"vocals": source}, windows, config)["vocals"]
 
+    def vocal_activity(path, windows):
+        from .vocal_activity import measure_vocal_activity
+        return measure_vocal_activity(vocals_path or path, windows)
+
     return AudioAdapters(select_readings if config.acoustic_readings else dictionary_readings,
                          align, melody, recognize, lyric_reading, recover_window,
-                         repeat_evidence)
+                         repeat_evidence, vocal_activity if vocals_path is not None else None)
