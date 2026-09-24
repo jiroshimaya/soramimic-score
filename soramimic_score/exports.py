@@ -72,26 +72,39 @@ def export_midi(document: ScoreDocument) -> bytes:
 
 
 def export_musicxml(document: ScoreDocument) -> bytes:
-    """Timewise approximation with explicit rests and per-note kana lyrics."""
+    """A 60 BPM score with four-beat measures, rests, and tied crossings."""
     root = ET.Element("score-partwise", version="4.0")
     ET.SubElement(root, "work")
     parts = ET.SubElement(root, "part-list")
     score_part = ET.SubElement(parts, "score-part", id="P1")
     ET.SubElement(score_part, "part-name").text = "Vocal"
     part = ET.SubElement(root, "part", id="P1")
-    measure = ET.SubElement(part, "measure", number="1", implicit="no")
-    attributes = ET.SubElement(measure, "attributes")
-    ET.SubElement(attributes, "divisions").text = "1000"
-    time = ET.SubElement(attributes, "time")
-    ET.SubElement(time, "beats").text = "4"
-    ET.SubElement(time, "beat-type").text = "4"
-    ET.SubElement(attributes, "clef")
-    tempo = ET.SubElement(measure, "direction")
+    measure_number = 0
+    measure = None
+    tempo = None
+
+    def next_measure():
+        nonlocal measure_number, measure, tempo
+        measure_number += 1
+        measure = ET.SubElement(part, "measure", number=str(measure_number))
+        if measure_number == 1:
+            attributes = ET.SubElement(measure, "attributes")
+            ET.SubElement(attributes, "divisions").text = "1000"
+            signature = ET.SubElement(attributes, "time")
+            ET.SubElement(signature, "beats").text = "4"
+            ET.SubElement(signature, "beat-type").text = "4"
+            clef = ET.SubElement(attributes, "clef")
+            ET.SubElement(clef, "sign").text = "G"
+            ET.SubElement(clef, "line").text = "2"
+            tempo = ET.SubElement(measure, "direction")
+
+    next_measure()
     sound = ET.SubElement(tempo, "sound")
     sound.set("tempo", "60")
-    previous = 0
+    cursor = 0
 
-    def add_note(duration: int, pitch: int | None, lyric: str = "") -> None:
+    def add_note(duration: int, pitch: int | None, lyric: str = "",
+                 *, tie_start: bool = False, tie_stop: bool = False) -> None:
         note = ET.SubElement(measure, "note")
         if pitch is None:
             ET.SubElement(note, "rest")
@@ -103,16 +116,42 @@ def export_musicxml(document: ScoreDocument) -> bytes:
                 ET.SubElement(p, "alter").text = "1"
             ET.SubElement(p, "octave").text = str(pitch // 12 - 1)
         ET.SubElement(note, "duration").text = str(duration)
+        if tie_stop:
+            ET.SubElement(note, "tie", type="stop")
+        if tie_start:
+            ET.SubElement(note, "tie", type="start")
+        if tie_start or tie_stop:
+            notations = ET.SubElement(note, "notations")
+            if tie_stop:
+                ET.SubElement(notations, "tied", type="stop")
+            if tie_start:
+                ET.SubElement(notations, "tied", type="start")
         if lyric:
             ET.SubElement(ET.SubElement(note, "lyric"), "text").text = lyric
+
+    def append_interval(end: int, pitch: int | None, lyric: str = "") -> None:
+        nonlocal cursor
+        first_piece = True
+        while cursor < end:
+            measure_end = ((cursor // 4000) + 1) * 4000
+            piece_end = min(end, measure_end)
+            more = piece_end < end
+            add_note(piece_end - cursor, pitch, lyric if first_piece else "",
+                     tie_start=bool(pitch is not None and more),
+                     tie_stop=bool(pitch is not None and not first_piece))
+            cursor = piece_end
+            first_piece = False
+            if cursor == measure_end:
+                next_measure()
 
     for slot in document.score.synthesis_plan:
         start = round(slot.start_sec * 1000)
         end = max(start + 1, round(slot.end_sec * 1000))
-        if start > previous:
-            add_note(start - previous, None)
-        add_note(end - start, slot.midi_pitch, "" if slot.continuation else slot.kana)
-        previous = end
+        if start > cursor:
+            append_interval(start, None)
+        append_interval(end, slot.midi_pitch, "" if slot.continuation else slot.kana)
+    if not list(measure.findall("note")) and measure_number > 1:
+        part.remove(measure)
     return ET.tostring(root, encoding="utf-8", xml_declaration=True)
 
 

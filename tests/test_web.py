@@ -3,6 +3,7 @@ import tempfile
 import time
 import unittest
 import wave
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 from xml.etree import ElementTree
@@ -10,6 +11,7 @@ from xml.etree import ElementTree
 from fastapi.testclient import TestClient
 
 from soramimic_score.web import create_app
+from soramimic_score.exports import export_musicxml
 from tests.test_document import ScoreDocumentTests
 
 
@@ -82,6 +84,18 @@ class ScoreWebTests(unittest.TestCase):
     def test_private_job_requires_unguessable_id(self):
         self.assertEqual(self.client.get("/api/jobs/missing").status_code, 404)
         self.assertEqual(self.client.get("/api/jobs/" + "0" * 32 + "/audio").status_code, 404)
+
+    def test_musicxml_splits_long_note_across_measures(self):
+        slot = replace(self.document.score.synthesis_plan[0], end_sec=4.5)
+        document = replace(self.document,
+                           score=replace(self.document.score, synthesis_plan=(slot,)))
+        root = ElementTree.fromstring(export_musicxml(document))
+        measures = root.findall("./part/measure")
+        self.assertEqual(len(measures), 2)
+        self.assertEqual([n.findtext("duration") for m in measures
+                          for n in m.findall("note")], ["4000", "500"])
+        self.assertEqual(measures[0].find("note/tie").get("type"), "start")
+        self.assertEqual(measures[1].find("note/tie").get("type"), "stop")
 
 
 if __name__ == "__main__":
