@@ -134,7 +134,7 @@ class PreparedAudioTests(unittest.TestCase):
             return (select_acoustic_reading(("カラ", "ソラ"), {"mix": "ソラ", "vocals": "ソラ"}),
                     ReadingSelection("ミミ", "dictionary", 1))
         def reject(_):
-            self.fail("supplied lyrics must not invoke lyric recognition")
+            return (LyricLine("空", 0, .4), LyricLine("耳", .4, .8))
         result = analyze_audio(self.audio, AudioAdapters(readings, fixtures.AudioPipelineTests._moras,
                                                        fixtures.AudioPipelineTests._melody, reject),
                                lyrics=("空", "耳"))

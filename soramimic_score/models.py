@@ -212,8 +212,13 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None) -> 
             del model
             _release()
 
-    def select_readings(path, lines):
+    def select_readings(path, lines, baselines=None):
         defaults = dictionary_readings(path, lines)
+        if baselines is not None:
+            defaults = tuple(replace(
+                default, kana=baseline.kana,
+                candidates=tuple(dict.fromkeys((baseline.kana, *default.candidates))),
+            ) for default, baseline in zip(defaults, baselines, strict=True))
         candidates = tuple(reading.candidates for reading in defaults)
         ambiguous = [index for index, row in enumerate(candidates) if len(row) > 1]
         if not ambiguous:
@@ -255,4 +260,5 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None) -> 
         return dictionary_readings(None, (LyricLine(text),))[0].kana
 
     return AudioAdapters(select_readings if config.acoustic_readings else dictionary_readings,
-                         align, melody, recognize, lyric_reading)
+                         align, melody, recognize, lyric_reading,
+                         select_readings if config.acoustic_readings else None)
