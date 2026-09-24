@@ -97,6 +97,27 @@ class ModelTests(unittest.TestCase):
         self.assertFalse(calls[1][1]["vad_filter"])
         self.assertFalse(calls[1][1]["condition_on_previous_text"])
 
+    def test_credit_retry_uses_short_audio_window_and_original_clock(self):
+        calls = []
+        def load_audio(path, **kwargs):
+            calls.append(("load", path, kwargs))
+            return [0.0] * 32000, 16000
+        class Whisper:
+            def __init__(self, name, **options):
+                calls.append(("model", name))
+            def transcribe(self, samples, **options):
+                calls.append(("samples", len(samples), options))
+                return iter([SimpleNamespace(text=" 空 ", start=.2, end=.7)]), None
+        with patch.dict(sys.modules, {"faster_whisper": SimpleNamespace(WhisperModel=Whisper),
+                                      "librosa": SimpleNamespace(load=load_audio)}), \
+             patch("soramimic_score.models._release"):
+            lines = create_adapters(self.config).lyric_recoverer(self.root / "audio.wav", 10, 12)
+        self.assertIn(("load", str(self.root / "audio.wav"),
+                       {"sr": 16000, "mono": True, "offset": 10, "duration": 2}), calls)
+        self.assertEqual(lines, (LyricLine("空", 10.2, 10.7),))
+        self.assertIn(("samples", 32000, {"language": "ja", "vad_filter": False,
+                                          "condition_on_previous_text": False}), calls)
+
     @unittest.skipUnless(importlib.util.find_spec("soramimic_yomi") and importlib.util.find_spec("MeCab"),
                          "audio dependencies not installed")
     def test_real_pronunciation_uses_yomi_and_handles_english(self):

@@ -100,6 +100,32 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None) -> 
             del model
             _release()
 
+    def recover_window(path, start, end):
+        """Retry a melody-supported credit span without the surrounding song."""
+        import librosa
+        from faster_whisper import WhisperModel
+
+        samples, _ = librosa.load(str(path), sr=16000, mono=True,
+                                  offset=start, duration=end - start)
+        if len(samples) == 0:
+            return ()
+        model = WhisperModel(config.whisper_model, device=config.device,
+                             compute_type="int8" if config.device == "cpu" else "float16",
+                             local_files_only=config.local_files_only)
+        try:
+            segments, _ = model.transcribe(samples, language="ja", vad_filter=False,
+                                           condition_on_previous_text=False)
+            lines = []
+            for segment in segments:
+                onset = max(start, start + float(segment.start))
+                offset = min(end, start + float(segment.end))
+                if segment.text.strip() and offset > onset:
+                    lines.append(LyricLine(segment.text.strip(), onset, offset))
+            return tuple(lines)
+        finally:
+            del model
+            _release()
+
     def align(path, lines, readings):
         logger.info("発音時刻を推定しています")
         import librosa
@@ -255,4 +281,4 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None) -> 
         return dictionary_readings(None, (LyricLine(text),))[0].kana
 
     return AudioAdapters(select_readings if config.acoustic_readings else dictionary_readings,
-                         align, melody, recognize, lyric_reading)
+                         align, melody, recognize, lyric_reading, recover_window)

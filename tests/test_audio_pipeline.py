@@ -14,6 +14,7 @@ from soramimic_score import (
     lyric_surface,
 )
 from soramimic_score.audio import is_credit_hallucination
+from soramimic_score.semantic import credit_recovery_windows
 
 
 class AudioPipelineTests(unittest.TestCase):
@@ -84,7 +85,7 @@ class AudioPipelineTests(unittest.TestCase):
                 for note in score.observations.note_candidates)
             for index in range(4)
         ))
-        self.assertEqual([item[0] for item in calls], ["lyrics", "readings", "moras", "melody"])
+        self.assertEqual([item[0] for item in calls], ["lyrics", "melody", "readings", "moras"])
         self.assertTrue(any(
             item.kind == "mora-ctc-anchor" and item.source == "test-ctc"
             for item in score.observations.evidence
@@ -95,8 +96,8 @@ class AudioPipelineTests(unittest.TestCase):
         adapters = AudioAdapters(self._readings, self._moras, self._melody,
                                  lambda _: (LyricLine("空", 0, .4),))
         analyze_audio(self.audio, adapters, on_progress=stages.append)
-        self.assertEqual(stages, ["歌詞を認識しています", "歌詞の読みを確認しています",
-                                  "モーラの時刻を推定しています", "音符と音高を推定しています",
+        self.assertEqual(stages, ["歌詞を認識しています", "音符と音高を推定しています",
+                                  "歌詞の読みを確認しています", "モーラの時刻を推定しています",
                                   "楽譜データを組み立てています"])
 
     def test_credit_like_whisper_line_is_excluded_before_alignment(self):
@@ -115,6 +116,39 @@ class AudioPipelineTests(unittest.TestCase):
         score = analyze_audio(self.audio, adapters)
         self.assertEqual(aligned, ["空"])
         self.assertEqual(score.score.canonical_text, "空")
+
+    def test_credit_gate_recovers_singing_island_by_short_whisper_retry(self):
+        self.assertFalse(is_credit_hallucination("作詞・作曲・君へ歌う"))
+        self.assertEqual(credit_recovery_windows(
+            LyricLine("作詞・作曲・編曲 初音ミク", 0, 5),
+            (MelodyNote(0, .2, 60), MelodyNote(1.3, 2, 60),
+             MelodyNote(2.1, 3, 61))), ((1.3, 3),))
+        recovered = []
+        def retry(_path, start, end):
+            recovered.append((start, end))
+            return (LyricLine("空", start, start + .4),)
+        def notes(_path):
+            return (MelodyNote(0, 1, 60), MelodyNote(1, 2, 62),
+                    MelodyNote(2.2, 2.6, 64))
+        adapters = AudioAdapters(self._readings, self._moras, notes,
+                                 lambda _: (LyricLine("作詞・作曲・編曲 初音ミク", 0, 2),
+                                            LyricLine("耳", 2.2, 2.6)),
+                                 lyric_recoverer=retry)
+        score = analyze_audio(self.audio, adapters)
+        self.assertEqual(recovered, [(0, 2)])
+        self.assertEqual(score.score.canonical_text, "空\n耳")
+        self.assertTrue(any(item.kind == "lyric-semantic-gate"
+                            and item.detail["status"] == "recovered"
+                            for item in score.observations.evidence))
+
+    def test_supplied_credit_text_remains_authoritative(self):
+        credit = "作詞・作曲・編曲 初音ミク"
+        def reading(_path, lines):
+            return tuple(ReadingSelection("サクシ", "test-reading", .9) for _ in lines)
+        adapters = AudioAdapters(reading, self._moras, self._melody,
+                                 lambda _: (LyricLine(credit, 0, .8),))
+        score = analyze_audio(self.audio, adapters, lyrics=(credit,))
+        self.assertEqual(score.score.canonical_text, credit)
 
     def test_known_lyrics_run_recognition_and_preserve_acoustic_result(self):
         def reject(_path):
