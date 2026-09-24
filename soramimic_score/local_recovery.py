@@ -65,8 +65,7 @@ _LATIN_MORAS = {"wow": ("ワ", "ウ"), "la": ("ラ",), "na": ("ナ",),
                 "da": ("ダ",), "fa": ("ファ",), "ha": ("ハ",), "ya": ("ヤ",)}
 
 
-def repeated_vocalization_period(text: str) -> tuple[str, ...] | None:
-    """Find a short repeating pure vocalization, excluding ordinary lyrics."""
+def _vocalization_moras(text: str) -> tuple[str, ...] | None:
     normalized = katakana(_normalized(text)).replace("ー", "")
     if not normalized:
         return None
@@ -88,12 +87,34 @@ def repeated_vocalization_period(text: str) -> tuple[str, ...] | None:
             cursor = match.end()
     else:
         return None
+    return tuple(moras)
+
+
+def repeated_vocalization_period(text: str) -> tuple[str, ...] | None:
+    """Find a short repeating pure vocalization, excluding ordinary lyrics."""
+    moras = _vocalization_moras(text)
+    if not moras:
+        return None
     for width in range(1, min(3, len(moras) // 2) + 1):
         if width > 1 and len(moras) < width * 3:
             continue
         if all(mora == moras[index % width] for index, mora in enumerate(moras)):
             return tuple(moras[:width])
     return None
+
+
+def is_pathological_repeated_vocalization(
+    line: LyricLine, notes: Sequence[MelodyNote],
+) -> bool:
+    """Reject decoder runaway, preserving ordinary observed repetitions."""
+    moras = _vocalization_moras(line.text)
+    if (not moras or repeated_vocalization_period(line.text) is None
+            or line.start_sec is None or line.end_sec is None):
+        return False
+    note_count = sum(line.start_sec <= (note.start_sec + note.end_sec) / 2 < line.end_sec
+                     for note in notes)
+    duration = max(1e-6, line.end_sec - line.start_sec)
+    return len(moras) > max(64, note_count * 2) or len(moras) / duration > 8
 
 
 def expand_repeated_vocalization_from_kana(
@@ -103,10 +124,7 @@ def expand_repeated_vocalization_from_kana(
     period = repeated_vocalization_period(line.text)
     if period is None or line.start_sec is None or line.end_sec is None:
         return None
-    source = kana_to_moras(katakana(line.text))
-    if not source:
-        source = tuple(period[index % len(period)] for index in range(
-            max(2, len(_normalized(line.text)) // 2)))
+    source = _vocalization_moras(line.text) or ()
     evidence = kana_to_moras("".join(re.findall(r"[ァ-ヶー]+",
                               katakana(evidence_text).replace("ヲ", "オ"))).replace("ー", ""))
     note_count = sum(line.start_sec <= (note.start_sec + note.end_sec) / 2 < line.end_sec

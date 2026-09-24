@@ -7,11 +7,40 @@ from soramimic_score.audio import (AlignedMora, AudioAdapters, LyricLine,
 from soramimic_score.local_recovery import (coalesce_repeated_suffix_fragments,
                                             deficit_windows,
                                             expand_repeated_vocalization_from_kana,
+                                            is_pathological_repeated_vocalization,
                                             repeated_vocalization_period,
                                             uncovered_note_windows)
 
 
 class LocalRecoveryTests(unittest.TestCase):
+    def test_decoder_runaway_is_rejected_without_dropping_short_repetition(self):
+        notes = tuple(MelodyNote(i * .25, (i + 1) * .25, 60) for i in range(8))
+        self.assertFalse(is_pathological_repeated_vocalization(LyricLine("ラ" * 6, 0, 2), notes))
+        self.assertTrue(is_pathological_repeated_vocalization(LyricLine("ラ" * 70, 0, 2), notes))
+        self.assertFalse(is_pathological_repeated_vocalization(LyricLine("カ" * 70, 0, 2), notes))
+
+    def test_decoder_runaway_is_omitted_from_automatic_score(self):
+        notes = tuple(MelodyNote(i * .25, (i + 1) * .25, 60) for i in range(12))
+        lines = (LyricLine("ラ" * 70, 0, 2), LyricLine("カキクケ", 2, 3))
+
+        def readings(_path, chosen):
+            return tuple(ReadingSelection(item.text, "test", 1) for item in chosen)
+
+        def align(_path, chosen, selected):
+            return tuple(AlignedMora(0, index, char, 2 + index * .25,
+                                     2 + (index + 1) * .25, .9)
+                         for index, char in enumerate(selected[0].kana))
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "input.wav"
+            path.write_bytes(b"model adapter fixture")
+            document = analyze_audio(path, AudioAdapters(
+                readings, align, lambda _: notes, lambda _: lines,
+            ))
+        self.assertEqual(document.score.canonical_text, "カキクケ")
+        self.assertTrue(any(e.kind == "lyric-repetition-rejection"
+                            for e in document.observations.evidence))
+
     def test_kana_evidence_expands_only_whisper_repetition_family_and_count(self):
         line = LyricLine("ララ", 0, 2)
         notes = tuple(MelodyNote(i * .25, (i + 1) * .25, 60) for i in range(8))
