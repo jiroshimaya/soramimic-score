@@ -42,7 +42,7 @@ audio{width:100%;margin:14px 0}canvas{width:100%;height:auto;border-radius:12px;
   <textarea id="lyrics-input" name="lyrics" placeholder="入力すると解析結果に対応付けて字幕に表示します。空欄なら認識した歌詞を使います。"></textarea>
   <p class="details">解析には時間がかかります。歌詞や音符には誤認識があり得ます。音源と結果は解析終了から約1時間後に自動削除します。結果画面からすぐ削除することもできます。<a href="/guidelines">利用ガイドライン</a></p>
   <button id="submit">解析する</button><div id="status" role="status"></div>
-  <div class="progress" id="progress" hidden><span class="spinner" aria-hidden="true"></span><div class="progress-body"><strong id="progress-label">準備しています</strong><progress class="progress-meter" id="progress-meter" max="8" value="0"></progress><small id="progress-detail">経過 0:00・残りの作業を確認しています</small></div></div>
+  <div class="progress" id="progress" hidden><span class="spinner" aria-hidden="true"></span><div class="progress-body"><strong id="progress-label">準備しています</strong><progress class="progress-meter" id="progress-meter" max="9" value="0"></progress><small id="progress-detail">経過 0:00・残りの作業を確認しています</small></div></div>
 </form>
 <section id="result" class="card" hidden>
   <h2>ピアノロール・歌詞プレビュー</h2>
@@ -63,13 +63,14 @@ const audioFile=document.querySelector('#audio-file'),uploadZone=document.queryS
 const selection=document.querySelector('#selection'),selectedName=document.querySelector('#selected-name');
 const recordButton=document.querySelector('#record-audio'),progress=document.querySelector('#progress'),progressLabel=document.querySelector('#progress-label');
 const progressMeter=document.querySelector('#progress-meter'),progressDetail=document.querySelector('#progress-detail');
-const phaseNames=['音声の準備','歌声の分離','歌詞の認識','音符と音高の推定','読みの確認','モーラ時刻の推定','楽譜データの組み立て','書き出し'];
+const phaseNames=['音声の準備','歌声の分離','歌詞の認識','音符と音高の推定','歌詞の再確認','読みの確認','モーラ時刻の推定','楽譜データの組み立て','書き出し'];
 let jobCreatedAt=null,progressClock=null,currentStage='';
 function phaseIndex(stage){
-  if(/書き出し/.test(stage))return 7;
-  if(/組み立て/.test(stage))return 6;
-  if(/モーラ/.test(stage))return 5;
-  if(/読み/.test(stage))return 4;
+  if(/書き出し/.test(stage))return 8;
+  if(/組み立て/.test(stage))return 7;
+  if(/モーラ/.test(stage))return 6;
+  if(/読み/.test(stage))return 5;
+  if(/再確認|繰り返し歌詞/.test(stage))return 4;
   if(/音符|音高/.test(stage))return 3;
   if(/歌詞|誤認識/.test(stage))return 2;
   if(/分離/.test(stage))return 1;
@@ -77,7 +78,7 @@ function phaseIndex(stage){
 }
 function updateProgress(){
   const index=phaseIndex(currentStage),elapsed=Math.max(0,Math.floor((Date.now()-(jobCreatedAt||Date.now()))/1000));
-  progressMeter.value=index;
+  progressMeter.value=Math.max(progressMeter.value,index);
   progressDetail.textContent=`経過 ${Math.floor(elapsed/60)}:${String(elapsed%60).padStart(2,'0')}・残り: ${phaseNames.slice(index+1).join(' → ')||'完了待ち'}`;
 }
 let data=null,jobId=null,recording=null,audioContext=null,audioDestination=null,lineWindows=[],playbackChoice=0;
@@ -145,7 +146,7 @@ form.addEventListener('submit',async event=>{
   event.preventDefault();
   if(!selectedFile){status.textContent='音声ファイルを選ぶか録音してください';return}
   if(micRecorder?.state==='recording'){status.textContent='録音を停止してから解析してください';return}
-  submit.disabled=true;status.textContent='アップロードしています…';progress.hidden=false;progressLabel.textContent='音声を送信しています';currentStage='音声の準備';jobCreatedAt=Date.now();updateProgress();result.hidden=true;
+  submit.disabled=true;status.textContent='アップロードしています…';progress.hidden=false;progressLabel.textContent='音声を送信しています';currentStage='音声の準備';progressMeter.value=0;jobCreatedAt=Date.now();updateProgress();result.hidden=true;
   try{
     const body=new FormData(form);body.set('audio',selectedFile,selectedFile.name);
     const response=await json('/api/jobs',{method:'POST',body});jobId=response.id;
