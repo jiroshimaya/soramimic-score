@@ -167,16 +167,41 @@ def deficit_windows(lines: Sequence[LyricLine], notes: Sequence[MelodyNote],
     median = statistics.median(ratios)
     windows = []
     for index, line, count, effective, found in rows:
-        if (count < 2 or len(found) < 7 or len(found) / max(effective, 1) < 1.5
+        period = repeated_vocalization_period(line.text)
+        if _vocalization_moras(line.text) is not None:
+            if period is None or len(period) == 1:
+                continue
+            peer_durations = [other.end_sec - other.start_sec
+                              for other_index, other in enumerate(lines)
+                              if other_index != index
+                              and other.start_sec is not None and other.end_sec is not None
+                              and _normalized(other.text) == _normalized(line.text)]
+            if (not peer_durations or
+                    (line.end_sec - line.start_sec) / statistics.median(peer_durations) < 1.5):
+                continue
+        if (len(found) < 7 or len(found) / max(effective, 1) < 1.5
                 or len(found) - median * effective < 4):
             continue
-        for first in range(0, len(found), 24):
-            group = found[first:first + 24]
+        groups: list[list[MelodyNote]] = []
+        for note in sorted(found, key=lambda item: item.start_sec):
+            if not groups or note.start_sec - groups[-1][-1].end_sec > .32:
+                groups.append([note])
+            else:
+                groups[-1].append(note)
+        groups = [group for group in groups
+                  if len(group) >= 4 and group[-1].end_sec - group[0].start_sec >= .6]
+        for group_index, group in enumerate(groups):
             start = max(line.start_sec, group[0].start_sec - .5)
             end = min(line.end_sec, group[-1].end_sec + .5)
-            if end - start >= 1.5 and end - start <= 20:
+            if group_index:
+                previous = groups[group_index - 1]
+                start = max(start, (previous[-1].end_sec + group[0].start_sec) / 2)
+            if group_index + 1 < len(groups):
+                following = groups[group_index + 1]
+                end = min(end, (group[-1].end_sec + following[0].start_sec) / 2)
+            if end > start:
                 windows.append((index, start, end))
-    return tuple(windows[:4])
+    return tuple(windows)
 
 
 def uncovered_note_windows(lines: Sequence[LyricLine], notes: Sequence[MelodyNote]
