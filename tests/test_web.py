@@ -174,6 +174,24 @@ class ScoreWebTests(unittest.TestCase):
         self.assertEqual(self.client.delete(f"/api/jobs/{job}").status_code, 409)
         self.assertTrue((root / job).exists())
 
+    def test_expired_job_waits_for_running_singing_synthesis(self):
+        root = Path(self.temporary.name)
+        job = "b" * 32
+        (root / job).mkdir()
+        (root / job / "resung.wav").write_bytes(wav_bytes())
+        db = root / "jobs.sqlite3"
+        with sqlite3.connect(db) as connection:
+            connection.execute("INSERT INTO jobs(id,state,created,ip,finished,synth_state) "
+                               "VALUES(?,?,?,?,?,?)",
+                               (job, "done", "2000-01-01T00:00:00+00:00", "127.0.0.1",
+                                "2000-01-01T00:00:00+00:00", "running"))
+        _prune(root, db)
+        self.assertTrue((root / job).exists())
+        with sqlite3.connect(db) as connection:
+            connection.execute("UPDATE jobs SET synth_state='done' WHERE id=?", (job,))
+        _prune(root, db)
+        self.assertFalse((root / job).exists())
+
     def test_expired_result_and_audio_are_removed(self):
         with patch.dict("os.environ", {"SORAMIMIC_SCORE_SHEETSAGE_MODEL": "a",
                                     "SORAMIMIC_SCORE_SHEETSAGE_BASE": "b"}):
