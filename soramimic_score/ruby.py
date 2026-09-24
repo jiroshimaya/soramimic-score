@@ -18,9 +18,8 @@ def ruby_segments(text: str, selected_kana: str) -> list[dict[str, str]]:
     """
     if not _NEEDS_RUBY.search(text):
         return [{"text": text, "reading": ""}]
-    from soramimic_yomi import get_tokens
-
     try:
+        from soramimic_yomi import get_tokens
         tokens = get_tokens(text, apply_rules=True)
     except Exception:
         return [{"text": text, "reading": selected_kana}]
