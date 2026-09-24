@@ -27,8 +27,24 @@ class ResingTests(unittest.TestCase):
             with wave.open(str(voice)) as wav:
                 samples = struct.unpack("<2400h", wav.readframes(2400))
             self.assertEqual(len(samples), 2400)
-            self.assertGreater(max(samples), 1600)
-            self.assertLess(max(samples), 1800)
+            self.assertGreater(max(samples), 1400)
+            self.assertLess(max(samples), 1500)
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "FFmpeg is required")
+    def test_loud_mix_is_limited_without_clipping(self):
+        with tempfile.TemporaryDirectory() as directory:
+            voice = Path(directory) / "voice.wav"
+            backing = Path(directory) / "backing.wav"
+            for path in (voice, backing):
+                with wave.open(str(path), "wb") as wav:
+                    wav.setnchannels(1)
+                    wav.setsampwidth(2)
+                    wav.setframerate(24000)
+                    wav.writeframes(struct.pack("<h", 30000) * 2400)
+            mix_accompaniment(voice, backing)
+            with wave.open(str(voice)) as wav:
+                samples = struct.unpack("<2400h", wav.readframes(2400))
+            self.assertLessEqual(max(samples), 31200)
 
     def test_score_has_lead_rest_and_mora_lyrics(self):
         slots = ScoreDocumentTests().score_document().score.synthesis_plan

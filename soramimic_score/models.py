@@ -109,7 +109,7 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None) -> 
         import librosa
         from faster_whisper import WhisperModel
 
-        samples, _ = librosa.load(str(path), sr=16000, mono=True,
+        samples, _ = librosa.load(str(vocals_path or path), sr=16000, mono=True,
                                   offset=start, duration=end - start)
         if len(samples) == 0:
             return ()

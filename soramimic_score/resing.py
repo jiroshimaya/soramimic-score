@@ -111,7 +111,8 @@ def mix_accompaniment(vocal: Path, accompaniment: Path) -> None:
         subprocess.run([
             "ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(vocal),
             "-i", str(accompaniment), "-filter_complex",
-            "[1:a]volume=0.7[bgm];[0:a][bgm]amix=inputs=2:duration=first:normalize=0[out]",
+            "[1:a]volume=0.45[bgm];[0:a][bgm]amix=inputs=2:duration=first:normalize=0,"
+            "alimiter=limit=0.95:attack=5:release=50:level=0:latency=1[out]",
             "-map", "[out]", "-c:a", "pcm_s16le", str(mixed),
         ], check=True, capture_output=True)
         mixed.replace(vocal)

@@ -22,6 +22,8 @@ from .document import ScoreDocument, compile_score
 from .ir import Boundary, Evidence, IntermediateRepresentation, NoteCandidate
 from .japanese import LyricSpan, ReadingCandidate, kana_to_moras
 from .line_windows import snap_line_windows_to_rests
+from .local_recovery import (coalesce_repeated_suffix_fragments, deficit_windows,
+                             uncovered_note_windows)
 from .note_runs import NoteRunConfig
 from .semantic import credit_recovery_windows, has_melodic_support, is_credit_hallucination
 
@@ -411,6 +413,72 @@ def analyze_audio(
         ))
     recognized_lines.sort(key=lambda item: (item.start_sec, item.end_sec))
     recognized = _validate_lines(recognized_lines, timed=True)
+    if lyrics is None:
+        recognized, merges = coalesce_repeated_suffix_fragments(recognized)
+        for left, right in merges:
+            semantic_evidence.append(Evidence(
+                f"audio-repeated-suffix-{left}", "soramimic_score.local_recovery",
+                "lyric-boundary-merge", 0.0,
+                {"source_segment_indices": [left, right]},
+            ))
+    if lyrics is None and adapters.lyric_recoverer is not None:
+        def count_moras(text: str) -> int:
+            try:
+                reading = adapters.lyric_reading(text) if adapters.lyric_reading else text
+            except ValueError:
+                reading = text
+            return len(kana_to_moras(reading))
+
+        def retry(start: float, end: float) -> tuple[LyricLine, ...]:
+            try:
+                candidates = _validate_lines(
+                    adapters.lyric_recoverer(path, start, end), timed=True)
+            except Exception:
+                return ()
+            return tuple(candidate for candidate in candidates
+                         if candidate.start_sec is not None and candidate.end_sec is not None
+                         and start <= candidate.start_sec < candidate.end_sec <= end
+                         and not is_credit_hallucination(candidate.text)
+                         and has_melodic_support(candidate, notes))
+
+        if on_progress:
+            on_progress("歌詞の欠落区間を再確認しています")
+        replacements: dict[int, tuple[LyricLine, ...]] = {}
+        counts = tuple(count_moras(line.text) for line in recognized)
+        for index, start, end in deficit_windows(recognized, notes, counts):
+            if index in replacements:
+                continue
+            candidates = retry(start, end)
+            source = recognized[index]
+            if (candidates and candidates[0].start_sec <= source.start_sec + .5
+                    and candidates[-1].end_sec >= source.end_sec - .5
+                    and sum(count_moras(item.text) for item in candidates) >= counts[index] + 2):
+                replacements[index] = candidates
+                semantic_evidence.append(Evidence(
+                    f"audio-deficit-recovery-{index}", "soramimic_score.local_recovery",
+                    "lyric-local-retry", 0.0,
+                    {"source_segment_index": index, "window": [start, end],
+                     "original_moras": counts[index], "recovered_moras":
+                     sum(count_moras(item.text) for item in candidates)},
+                ))
+        retained = tuple(item for index, line in enumerate(recognized)
+                         for item in replacements.get(index, (line,)))
+        additions = []
+        for start, end in uncovered_note_windows(retained, notes):
+            for candidate in retry(start, end):
+                if any(candidate.start_sec < line.end_sec and candidate.end_sec > line.start_sec
+                       for line in (*retained, *additions)):
+                    continue
+                additions.append(candidate)
+                semantic_evidence.append(Evidence(
+                    f"audio-gap-recovery-{len(additions)}", "soramimic_score.local_recovery",
+                    "lyric-local-retry", 0.0,
+                    {"window": [start, end], "recovered_text": candidate.text},
+                ))
+        recognized = _validate_lines(
+            sorted((*retained, *additions), key=lambda item: (item.start_sec, item.end_sec)),
+            timed=True,
+        )
     adjustment, overlay = None, None
     lines = recognized
     if lyrics is not None:
