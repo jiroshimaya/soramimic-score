@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="ja">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Soramimic Score</title>
+<style>
+:root{color-scheme:dark;font-family:system-ui,"Noto Sans JP",sans-serif;background:#0d1020;color:#f4f4fa}
+*{box-sizing:border-box}body{margin:0}main{max-width:1000px;margin:auto;padding:24px}
+h1{font-size:clamp(1.8rem,5vw,3rem);margin:.3em 0}p{line-height:1.65;color:#bbc1d4}
+.card{background:#191e32;border:1px solid #333c5c;border-radius:16px;padding:20px;margin:20px 0}
+label{display:block;font-weight:700;margin:16px 0 8px}input,textarea,button{font:inherit}
+input[type=file],textarea{width:100%;background:#101528;color:#fff;border:1px solid #596383;border-radius:9px;padding:12px}
+textarea{min-height:130px;resize:vertical}button,.link{display:inline-block;background:#79e2c4;color:#102323;border:0;border-radius:9px;padding:11px 17px;text-decoration:none;font-weight:800;cursor:pointer;margin:7px 7px 0 0}
+button:disabled{opacity:.45;cursor:wait}.secondary{background:#343d5c;color:#f5f5ff}
+#status{min-height:1.7em;color:#96e6d0}#result[hidden]{display:none}
+audio{width:100%;margin:14px 0}canvas{width:100%;height:auto;border-radius:12px;background:#0b1228;border:1px solid #354166}
+.screen{position:relative}.lyrics{position:absolute;bottom:14px;left:2%;width:96%;text-align:center;font-size:clamp(20px,4vw,36px);font-weight:900;text-shadow:0 2px 6px #000,0 0 10px #000;pointer-events:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lyrics .base{color:#e8ebf3}.lyrics .active{position:absolute;left:0;top:0;color:#7df6d1;overflow:hidden;white-space:nowrap;width:0;text-align:left}
+.moras{display:flex;flex-wrap:wrap;gap:5px;min-height:44px;margin:12px 0}.mora{padding:5px 8px;border:1px solid #526080;border-radius:6px;color:#a8b4c9}.mora.on{background:#7df6d1;color:#132824;border-color:#7df6d1}.mora.past{color:#7df6d1}
+.downloads{display:flex;flex-wrap:wrap}.details{color:#bfc6d9;font-size:.9rem}
+</style>
+<main>
+<header><h1>Soramimic Score</h1><p>歌唱WAVから歌詞・モーラ時刻・音符を推定し、ピアノロールで確認できます。</p></header>
+<form class="card" id="form">
+  <label for="audio-file">歌唱音源（PCM WAV、15分・100 MBまで）</label>
+  <input type="file" id="audio-file" name="audio" accept=".wav,audio/wav" required>
+  <label for="lyrics-input">正解歌詞（任意、1行1フレーズ）</label>
+  <textarea id="lyrics-input" name="lyrics" placeholder="入力すると解析結果に対応付けて字幕に表示します。空欄なら認識した歌詞を使います。"></textarea>
+  <p class="details">解析には時間がかかります。歌詞や音符には誤認識があり得るため、書き出す前に確認してください。</p>
+  <button id="submit">解析する</button><div id="status" role="status"></div>
+</form>
+<section id="result" class="card" hidden>
+  <h2>ピアノロール・歌詞プレビュー</h2>
+  <audio id="player" controls preload="metadata"></audio>
+  <div class="screen"><canvas id="roll" width="1280" height="560"></canvas><div class="lyrics"><span class="base" id="line-base"></span><span class="active" id="line-active"></span></div></div>
+  <div class="moras" id="moras"></div>
+  <p class="details" id="timing"></p>
+  <button class="secondary" id="record" type="button">プレビュー動画を保存</button>
+  <h2>ダウンロード</h2><div class="downloads" id="downloads"></div>
+</section>
+</main>
+<script>
+const form=document.querySelector('#form'),status=document.querySelector('#status'),submit=document.querySelector('#submit');
+const result=document.querySelector('#result'),player=document.querySelector('#player'),canvas=document.querySelector('#roll'),ctx=canvas.getContext('2d');
+let data=null,jobId=null,recording=null,audioContext=null,audioDestination=null;
+const fmt=t=>`${Math.floor(t/60)}:${String(Math.floor(t%60)).padStart(2,'0')}.${String(Math.floor((t%1)*100)).padStart(2,'0')}`;
+const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+async function json(url,options){const response=await fetch(url,options);const value=await response.json();if(!response.ok)throw Error(value.detail||'通信エラー');return value}
+form.addEventListener('submit',async event=>{
+  event.preventDefault();submit.disabled=true;status.textContent='アップロードしています…';result.hidden=true;
+  try{
+    const response=await json('/api/jobs',{method:'POST',body:new FormData(form)});jobId=response.id;
+    while(true){await pause(2000);const state=await json(`/api/jobs/${jobId}`);
+      if(state.state==='failed')throw Error(state.error||'解析に失敗しました');
+      if(state.state==='done')break;
+      status.textContent=state.state==='running'?'音源を解析しています…':'順番を待っています…';
+    }
+    data=await json(`/api/jobs/${jobId}/score`);player.src=`/api/jobs/${jobId}/audio`;
+    document.querySelector('#downloads').replaceChildren();
+    for(const [ext,label] of [['json','歌詞・音符JSON'],['mid','MIDI'],['musicxml','MusicXML'],['srt','SRT字幕'],['lrc','LRC歌詞']]){
+      const a=document.createElement('a');a.className='link';a.href=`/api/jobs/${jobId}/download/${ext}`;a.download=`score.${ext}`;a.textContent=label;document.querySelector('#downloads').append(a);
+    }
+    result.hidden=false;status.textContent='解析が完了しました。';draw();result.scrollIntoView({behavior:'smooth'});
+  }catch(error){status.textContent=error.message}finally{submit.disabled=false}
+});
+function currentLine(t){
+  const byLine=new Map(data.lines.map(line=>[line.id,[]]));
+  data.moras.forEach(m=>byLine.get(m.line)?.push(m));
+  const line=data.lines.find(line=>byLine.get(line.id).some(m=>m.start<=t&&t<m.end));
+  return line?{line,moras:byLine.get(line.id)}:null;
+}
+function draw(){
+  if(!data)return;const t=player.currentTime||0,w=canvas.width,h=canvas.height;
+  ctx.fillStyle='#10172d';ctx.fillRect(0,0,w,h);
+  const minPitch=Math.min(48,...data.notes.map(n=>n.pitch))-2,maxPitch=Math.max(84,...data.notes.map(n=>n.pitch))+2;
+  const px=left=>w/2+(left-t)*125,py=p=>h-80-(p-minPitch)*((h-135)/(maxPitch-minPitch));
+  ctx.font='17px system-ui';ctx.textAlign='left';
+  for(let p=minPitch;p<=maxPitch;p++){
+    const y=py(p);ctx.strokeStyle=p%12===0?'#465575':'#25304a';ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(w,y);ctx.stroke();
+    if(p%12===0){ctx.fillStyle='#94a6c8';ctx.fillText(`C${Math.floor(p/12)-1}`,12,y-5)}
+  }
+  for(let sec=Math.max(0,Math.floor(t-5));sec<t+6;sec++){
+    const x=px(sec);ctx.strokeStyle='#36415d';ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,h-70);ctx.stroke();
+    ctx.fillStyle='#9cabc7';ctx.fillText(fmt(sec),x+4,h-46)
+  }
+  for(const note of data.notes){const x=px(note.start),right=px(note.end);if(right<0||x>w)continue;
+    const y=py(note.pitch)-10;ctx.fillStyle=note.end<=t?'#4cbfa9':note.start<=t?'#8cf7cd':'#6784cc';
+    ctx.fillRect(x,y,Math.max(2,right-x),20);ctx.strokeStyle='#c8e6ff';ctx.strokeRect(x,y,Math.max(2,right-x),20);
+  }
+  ctx.strokeStyle='#ffcf70';ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(w/2,0);ctx.lineTo(w/2,h-70);ctx.stroke();ctx.lineWidth=1;
+  const active=currentLine(t),base=document.querySelector('#line-base'),fill=document.querySelector('#line-active'),moraBox=document.querySelector('#moras');
+  base.textContent=active?.line.text||'';fill.textContent=active?.line.text||'';
+  if(active){const first=active.moras[0].start,last=active.moras.at(-1).end;
+    const progress=Math.max(0,Math.min(1,(t-first)/(last-first)));
+    fill.style.width=`${progress*100}%`;
+    ctx.font='bold 38px system-ui';ctx.textAlign='center';ctx.lineWidth=7;
+    ctx.strokeStyle='#080b14';ctx.strokeText(active.line.text,w/2,h-100);
+    ctx.fillStyle='#e8ebf3';ctx.fillText(active.line.text,w/2,h-100);
+    ctx.save();ctx.beginPath();ctx.rect(0,0,w/2+ctx.measureText(active.line.text).width*(progress-.5),h);ctx.clip();
+    ctx.fillStyle='#7df6d1';ctx.fillText(active.line.text,w/2,h-100);ctx.restore();ctx.lineWidth=1;
+    const key=active.line.id;if(moraBox.dataset.line!==key){moraBox.dataset.line=key;moraBox.replaceChildren();
+      for(const m of active.moras){const span=document.createElement('span');span.className='mora';span.textContent=m.text;moraBox.append(span)}
+    }
+    [...moraBox.children].forEach((el,i)=>el.className='mora '+(active.moras[i].end<=t?'past':active.moras[i].start<=t?'on':''));
+    document.querySelector('#timing').textContent=active.moras.map(m=>`${m.text} ${fmt(m.start)}–${fmt(m.end)}`).join('　');
+  }else{fill.style.width='0';moraBox.replaceChildren();moraBox.dataset.line='';document.querySelector('#timing').textContent=''}
+  requestAnimationFrame(draw);
+}
+document.querySelector('#record').addEventListener('click',async()=>{
+  if(!canvas.captureStream||!window.MediaRecorder){status.textContent='このブラウザは動画保存に対応していません';return}
+  const button=document.querySelector('#record');if(recording){recording.stop();return}
+  const stream=canvas.captureStream(30);
+  if(!audioContext){audioContext=new AudioContext();const source=audioContext.createMediaElementSource(player);
+    audioDestination=audioContext.createMediaStreamDestination();source.connect(audioDestination);source.connect(audioContext.destination)}
+  await audioContext.resume();
+  for(const track of audioDestination.stream.getAudioTracks())stream.addTrack(track);
+  const chunks=[];recording=new MediaRecorder(stream);
+  recording.ondataavailable=e=>chunks.push(e.data);
+  recording.onstop=()=>{const url=URL.createObjectURL(new Blob(chunks,{type:recording.mimeType}));const a=document.createElement('a');a.href=url;a.download='score-preview.webm';a.click();setTimeout(()=>URL.revokeObjectURL(url),60000);button.textContent='プレビュー動画を保存';recording=null};
+  player.currentTime=0;await player.play();recording.start();button.textContent='録画を終了';player.addEventListener('ended',()=>recording?.stop(),{once:true});
+});
+</script>
+</html>

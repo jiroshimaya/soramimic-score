@@ -55,6 +55,32 @@ flowchart TD
 
 ## 現在の使い方
 
+### ブラウザで使う
+
+音声モデルの依存とWeb用の依存を入れ、SheetSage2とMERTのディレクトリを指定します。
+音源・入力歌詞・解析結果は`SORAMIMIC_SCORE_DATA`以下に保存され、完了または失敗から
+24時間を過ぎたジョブは次のアップロード時に削除されます。このディレクトリはGitの外に置いてください。
+
+```sh
+uv sync --extra audio --extra web
+export SORAMIMIC_SCORE_SHEETSAGE_MODEL=/path/to/SheetSage2
+export SORAMIMIC_SCORE_SHEETSAGE_BASE=/path/to/MERT-v2-FullSong
+export SORAMIMIC_SCORE_DATA=/path/to/private-score-data
+uv run --extra audio --extra web uvicorn soramimic_score.web:app --host 127.0.0.1 --port 8313 --no-access-log
+```
+
+WAVをアップロードすると、任意の入力歌詞を自動認識の結果に対応付けて解析します。
+音源と同期したピアノロールとモーラ時刻を確認し、ブラウザ対応時は字幕入りWebM動画を
+保存できます。Score JSON、標準MIDI、MusicXML、SRT、LRCをダウンロードできます。
+入力歌詞を指定した場合、対応が確かな行の字幕にはその表記を使用します。
+時刻が音声から得られなかったモーラは音符区間からの推定値です。
+
+公開用に`SORAMIMIC_SCORE_PUBLIC=1`を設定すると、UTC日付ごとにIPあたり100件まで
+アップロードを受け付けます。ジョブIDは推測困難な値で、結果のURLを知る人だけが
+取得できます。公開前にリバースプロキシ側でTLSとアップロード上限を設定してください。
+
+### コマンドラインで使う
+
 ソースを取得したディレクトリで音声用の依存をインストールします。Python 3.11を推奨します。
 `soramimic-yomi`をGitから取得するため、Gitも必要です。
 

@@ -18,6 +18,8 @@ dependencies = [
 soramimic-score = "soramimic_score.__main__:main"
 
 [project.optional-dependencies]
+web = ["fastapi>=0.115,<1", "uvicorn>=0.30,<1", "python-multipart>=0.0.9,<1"]
+test = ["httpx>=0.27,<1"]
 audio = [
   "soramimic-yomi @ git+https://github.com/soramimic/soramimic-yomi@db8a5406732be25ca827dc5faa4d02f43c9927b2",
   "demucs==4.0.1",
@@ -36,6 +38,9 @@ audio = [
 
 [tool.setuptools]
 packages = ["soramimic_score"]
+
+[tool.setuptools.package-data]
+soramimic_score = ["score.html"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
