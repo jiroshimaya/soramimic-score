@@ -189,6 +189,37 @@ def attach_lyric_surface(document: ScoreDocument, overlay: dict[str, Any]) -> Sc
                    score=replace(document.score, evidence=evidence))
 
 
+def plan_lyric_inputs(
+    recognized: Sequence[SurfaceLine], supplied: Sequence[SurfaceLine],
+) -> dict[str, Any]:
+    """Locate supplied text before selecting pronunciation or final alignment.
+
+    A matched many-to-many group becomes one final lyric interval. Its reading
+    must be derived from the supplied text, not the recognition. Unmatched ASR
+    lines remain separate and explicitly identified; unused input is retained.
+    ``asr_indices`` refer to recognition, ``line_indices`` to final lyric lines.
+    This plan contains no invented word/mora times and makes no acoustic claim.
+    """
+    plan = align_lyric_surface(recognized, supplied)
+    groups = []
+    for group in plan["groups"]:
+        if group["operation"] == "match":
+            groups.append(group | {"reading_source": "supplied-lyrics"})
+        else:
+            for index in group["asr_indices"]:
+                line = recognized[index]
+                groups.append(group | {
+                    "asr_indices": [index], "original_text": line.text,
+                    "display_text": line.text, "acoustic_reading": line.reading,
+                    "reading_source": "automatic-unmatched",
+                })
+    for index, group in enumerate(groups):
+        group["line_indices"] = [index]
+    plan.update(mode="asr-localized-supplied-lyrics", groups=groups,
+                display_text="\n".join(g["display_text"] for g in groups))
+    return plan
+
+
 def lyric_surface(document: ScoreDocument) -> dict[str, Any] | None:
     """Return the optional display overlay; the canonical graph remains acoustic."""
     return next((e.detail for e in document.observations.evidence

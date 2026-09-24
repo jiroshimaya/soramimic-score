@@ -2,7 +2,6 @@ import copy
 import math
 import tempfile
 import unittest
-from dataclasses import replace
 from pathlib import Path
 
 from soramimic_score import (
@@ -70,41 +69,61 @@ class SurfaceTests(unittest.TestCase):
 
 
 class LocalReadingTests(unittest.TestCase):
-    def test_local_refinement_keeps_other_line_and_roundtrips_provenance(self):
+    def test_supplied_reading_is_fixed_before_the_only_alignment(self):
         calls = []
         def readings(_path, lines):
-            return tuple(ReadingSelection("アス" if l.text == "明日" else "ソラ", "test", 1)
-                         for l in lines)
+            calls.append(("readings", [line.text for line in lines]))
+            return [ReadingSelection("タチマチ", "test", 1, ("タチマチ",)) for line in lines]
         def align(_path, lines, selected):
-            calls.append([l.text for l in lines])
-            output = []
-            for i, (line, reading) in enumerate(zip(lines, selected)):
-                step = (line.end_sec - line.start_sec) / len(reading.kana)
-                output.extend(AlignedMora(i, j, kana, line.start_sec + j * step,
-                                         line.start_sec + (j + 1) * step, 1)
-                              for j, kana in enumerate(reading.kana))
-            return output
-        def refine(_path, lines, baseline):
-            return tuple(ReadingSelection("アシタ", "test-acoustic", 1, ("アス", "アシタ"))
-                         if line.text == "明日" else current
-                         for line, current in zip(lines, baseline, strict=True))
+            calls.append(("align", [r.kana for r in selected]))
+            return [AlignedMora(0, i, kana, i * .2, (i + 1) * .2, 1)
+                    for i, kana in enumerate(selected[0].kana)]
         adapters = AudioAdapters(
-            readings, align,
-            lambda _: tuple(MelodyNote(i * .2, (i + 1) * .2, 60) for i in range(6)),
-            lambda _: (LyricLine("明日", 0, .6), LyricLine("空", .8, 1.2)),
-            lambda text: "アシタ" if text == "明日" else "ソラ", refine,
+            readings, align, lambda _: (MelodyNote(0, .8, 60),),
+            lambda _: (LyricLine("たつまち", 0, .8),),
         )
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "input.wav"
             path.touch()
-            automatic = analyze_audio(path, replace(adapters, reading_refiner=None))
-            result = analyze_audio(path, adapters, lyrics=["明日", "空"])
-        self.assertEqual(calls[-1], ["明日"])
-        self.assertEqual(lyric_surface(result)["reading_reviews"][0]["status"], "applied")
-        self.assertTrue(lyric_surface(result)["acoustic_changes"])
-        self.assertEqual([s.kana for s in result.score.synthesis_plan if s.utterance_id == "u1"],
-                         [s.kana for s in automatic.score.synthesis_plan if s.utterance_id == "u1"])
-        self.assertEqual(lyric_surface(ScoreDocument.from_json(result.to_json())), lyric_surface(result))
+            result = analyze_audio(path, adapters, lyrics=["たちまち"])
+        self.assertEqual(calls, [("readings", ["たちまち"]), ("align", ["タチマチ"])])
+        self.assertEqual(result.score.canonical_text, "たちまち")
+        self.assertEqual([r.kana for r in result.observations.readings], ["タチマチ"])
+        overlay = lyric_surface(result)
+        self.assertEqual(overlay["groups"][0]["original_text"], "たつまち")
+        self.assertTrue(overlay["readings_fixed_before_alignment"])
+        self.assertEqual(lyric_surface(ScoreDocument.from_json(result.to_json())), overlay)
+
+    def test_final_alignment_failure_never_restores_the_wrong_reading(self):
+        calls = []
+        def align(_path, _lines, selected):
+            calls.append(selected[0].kana)
+            raise ValueError("insufficient frames")
+        adapters = AudioAdapters(
+            lambda _p, _l: [ReadingSelection("タチマチ", "test", 1)], align,
+            lambda _: (MelodyNote(0, .8, 60),),
+            lambda _: (LyricLine("たつまち", 0, .8),),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "input.wav"
+            path.touch()
+            with self.assertRaisesRegex(AudioPipelineError, "insufficient frames"):
+                analyze_audio(path, adapters, lyrics=["たちまち"])
+        self.assertEqual(calls, ["タチマチ"])
+
+    def test_split_recognition_is_joined_before_reading_selection(self):
+        from soramimic_score import plan_lyric_inputs
+        result = plan_lyric_inputs(
+            [SurfaceLine("青い空", "アオイソラ"), SurfaceLine("白い雲", "シロイクモ"),
+             SurfaceLine("ねこ", "ネコ")],
+            [SurfaceLine("青い空白い雲", "アオイソラシロイクモ"), SurfaceLine("遠い星", "トオイホシ")],
+        )
+        self.assertEqual(result["groups"][0]["asr_indices"], [0, 1])
+        self.assertEqual(result["groups"][0]["line_indices"], [0])
+        self.assertEqual(result["groups"][1]["asr_indices"], [2])
+        self.assertEqual(result["groups"][1]["line_indices"], [1])
+        self.assertEqual(result["groups"][1]["reading_source"], "automatic-unmatched")
+        self.assertEqual(result["unused_supplied_indices"], [1])
 
     def test_touching_float_dust_is_not_a_real_overlap(self):
         from soramimic_score.audio import _validate_lines

@@ -15,6 +15,11 @@ SPECIAL_MORAS = frozenset({"ン", "ッ", "ー"})
 _RUBY = re.compile(r"｜([^《｜]+)《([^《》]+)》")
 
 
+def strip_ruby(text: str) -> str:
+    """Keep lyric spelling, removing explicit pronunciation annotations."""
+    return _RUBY.sub(lambda match: match[1], text)
+
+
 @dataclass(frozen=True)
 class ReadingCandidate:
     kana: str
