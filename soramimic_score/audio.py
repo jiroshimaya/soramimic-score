@@ -21,6 +21,8 @@ from .alignment import ObservedSingingUnit, build_known_lyrics_document
 from .document import ScoreDocument, compile_score
 from .ir import Boundary, Evidence, IntermediateRepresentation, NoteCandidate
 from .japanese import LyricSpan, ReadingCandidate, kana_to_moras
+from .line_windows import snap_line_windows_to_rests
+from .note_runs import NoteRunConfig
 from .semantic import credit_recovery_windows, has_melodic_support, is_credit_hallucination
 
 
@@ -322,6 +324,7 @@ def analyze_audio(
     model_config: ModelConfig | None = None,
     adjust_lyrics: bool = False,
     on_progress: Callable[[str], None] | None = None,
+    accompaniment_path: Path | None = None,
 ) -> ScoreDocument:
     """Locate lyrics with ASR, fix pronunciation, then align the final reading.
 
@@ -350,7 +353,11 @@ def analyze_audio(
         with decoded_audio(path) as prepared_path:
             if on_progress and model_config.separate_vocals:
                 on_progress("歌声を分離しています")
-            with prepared_adapters(prepared_path, model_config) as prepared:
+            preparation = (prepared_adapters(prepared_path, model_config)
+                           if accompaniment_path is None else
+                           prepared_adapters(prepared_path, model_config,
+                                             accompaniment_path=accompaniment_path))
+            with preparation as prepared:
                 return analyze_audio(prepared_path, prepared, lyrics=lyrics,
                                      adjust_lyrics=adjust_lyrics, on_progress=on_progress)
 
@@ -465,5 +472,15 @@ def analyze_audio(
          for index, line in enumerate(lines)
          if line.start_sec is not None and line.end_sec is not None} or None
     )
-    result = compile_score(observations, line_windows_by_utterance=line_windows)
+    if line_windows is not None and len(line_windows) == len(lines):
+        snapped = snap_line_windows_to_rests(
+            tuple(line_windows[f"u{index}"] for index in range(len(lines))), notes,
+        )
+        line_windows = {f"u{index}": window
+                        for index, window in enumerate(snapped)}
+    result = compile_score(
+        observations,
+        config=NoteRunConfig(whisper_boundary_cost_per_sec2=.1),
+        line_windows_by_utterance=line_windows,
+    )
     return attach_lyric_surface(result, overlay) if overlay is not None else result

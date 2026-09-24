@@ -142,7 +142,8 @@ def create_app(*, data_root: Path | None = None, analyzer=None, public: bool | N
                 encoding="utf-8").splitlines() if line.strip()) if supplied else None
             if analyzer is None:
                 result = analyze_audio(job_dir / "input.wav", model_config=config,
-                                       lyrics=lyrics, on_progress=progress)
+                                       lyrics=lyrics, on_progress=progress,
+                                       accompaniment_path=job_dir / "accompaniment.flac")
             else:
                 progress("音源を解析しています")
                 result = analyzer(job_dir / "input.wav", model_config=config, lyrics=lyrics)
@@ -185,6 +186,13 @@ def create_app(*, data_root: Path | None = None, analyzer=None, public: bool | N
                                                  "http://127.0.0.1:50021"),
                        duration_sec=duration, on_progress=on_progress,
                        excluded_utterance_ids=excluded)
+            accompaniment = job_dir / "accompaniment.flac"
+            if accompaniment.is_file():
+                from .resing import mix_accompaniment
+                with sqlite3.connect(db) as conn:
+                    conn.execute("UPDATE jobs SET synth_stage=? WHERE id=?",
+                                 ("伴奏を重ねています", job))
+                mix_accompaniment(output, accompaniment)
             with sqlite3.connect(db) as conn:
                 conn.execute("UPDATE jobs SET synth_state='done', synth_stage=NULL WHERE id=?", (job,))
         except Exception:
@@ -260,15 +268,17 @@ def create_app(*, data_root: Path | None = None, analyzer=None, public: bool | N
     def status(job: str):
         job = _job_id(job)
         with sqlite3.connect(db) as conn:
-            row = conn.execute("SELECT state,error,stage FROM jobs WHERE id=?", (job,)).fetchone()
+            row = conn.execute("SELECT state,error,stage,created FROM jobs WHERE id=?", (job,)).fetchone()
         if not row:
             raise HTTPException(404)
-        return {"id": job, "state": row[0], "error": row[1], "stage": row[2]}
+        return {"id": job, "state": row[0], "error": row[1], "stage": row[2],
+                "created": row[3]}
 
     @app.get("/api/jobs/{job}/score")
     def score(job: str):
         document = _completed(root, db, _job_id(job))
         from .audio import is_credit_hallucination
+        from .ruby import ruby_segments
         excluded = (frozenset(line.utterance_id for line in document.score.canonical
                               if is_credit_hallucination(line.text))
                     if not (root / job / "lyrics.txt").exists() else frozenset())
@@ -303,7 +313,8 @@ def create_app(*, data_root: Path | None = None, analyzer=None, public: bool | N
                                  "source": "aligned" if aligned else "estimated"})
         timeline.sort(key=lambda x: (x["start"], x["end"]))
         return {"lines": [{"id": line.utterance_id, "text": line.text,
-                           "kana": line.kana} for line in document.score.canonical
+                           "kana": line.kana, "ruby": ruby_segments(line.text, line.kana)}
+                          for line in document.score.canonical
                           if line.utterance_id not in excluded],
                 "notes": [{"start": s.start_sec, "end": s.end_sec, "pitch": s.midi_pitch,
                            "line": s.utterance_id, "kana": s.kana} for s in slots],

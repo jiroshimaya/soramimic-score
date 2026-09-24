@@ -21,10 +21,9 @@ button:disabled{opacity:.45;cursor:wait}.secondary{background:#343d5c;color:#f5f
 .progress{display:flex;align-items:center;gap:13px;margin-top:16px;padding:13px 15px;border-radius:10px;background:#111a2d;color:#d2f9ec}
 .progress[hidden],.selection[hidden]{display:none}.spinner{width:20px;height:20px;border:3px solid #6a927f;border-top-color:#91ffcf;border-radius:50%;animation:spin .9s linear infinite;flex:none}
 @keyframes spin{to{transform:rotate(360deg)}}.progress small{display:block;color:#aab8c8;margin-top:3px}
+.progress-body{width:100%}.progress-meter{width:100%;height:10px;margin:9px 0 2px;accent-color:#79e2c4}
 audio{width:100%;margin:14px 0}canvas{width:100%;height:auto;border-radius:12px;background:#0b1228;border:1px solid #354166}
 .screen{position:relative}
-.moras{display:flex;flex-wrap:wrap;gap:5px;min-height:44px;margin:12px 0}.mora{padding:5px 8px;border:1px solid #526080;border-radius:6px;color:#a8b4c9}.mora.on{background:#7df6d1;color:#132824;border-color:#7df6d1}.mora.past{color:#7df6d1}
-.moras[hidden],#timing[hidden]{display:none}
 .downloads{display:flex;flex-wrap:wrap}.details{color:#bfc6d9;font-size:.9rem}
 </style>
 <main>
@@ -43,17 +42,15 @@ audio{width:100%;margin:14px 0}canvas{width:100%;height:auto;border-radius:12px;
   <textarea id="lyrics-input" name="lyrics" placeholder="入力すると解析結果に対応付けて字幕に表示します。空欄なら認識した歌詞を使います。"></textarea>
   <p class="details">解析には時間がかかります。歌詞や音符には誤認識があり得ます。音源と結果は解析終了から約24時間後に自動削除します。<a href="/guidelines">利用ガイドライン</a></p>
   <button id="submit">解析する</button><div id="status" role="status"></div>
-  <div class="progress" id="progress" hidden><span class="spinner" aria-hidden="true"></span><div><strong id="progress-label">準備しています</strong><small>段階ごとに進みます。所要時間は音源によって異なります。</small></div></div>
+  <div class="progress" id="progress" hidden><span class="spinner" aria-hidden="true"></span><div class="progress-body"><strong id="progress-label">準備しています</strong><progress class="progress-meter" id="progress-meter" max="8" value="0"></progress><small id="progress-detail">経過 0:00・残りの作業を確認しています</small></div></div>
 </form>
 <section id="result" class="card" hidden>
   <h2>ピアノロール・歌詞プレビュー</h2>
   <audio id="player" controls preload="metadata"></audio>
   <p class="details"><a id="result-link" href="#">この結果へのリンク</a>（約24時間有効）</p>
   <div><button class="secondary" id="original-audio" type="button">元音源を再生</button><button class="secondary" id="resing-audio" type="button">VOICEVOXで歌い直す</button><span class="details" id="resing-status" role="status"></span></div>
-  <p class="details">歌い直しは音符と歌詞から波音リツで合成した単独の歌声です。VOICEVOX:波音リツ</p>
+  <p class="details">歌い直しは音符と歌詞から波音リツで合成し、分離した伴奏を重ねます。VOICEVOX:波音リツ。分離前の結果では歌声のみです。</p>
   <div class="screen"><canvas id="roll" width="1280" height="480" aria-label="音符とカラオケ字幕のピアノロール"></canvas></div>
-  <div class="moras" id="moras" hidden></div>
-  <p class="details" id="timing" hidden></p>
   <button class="secondary" id="record" type="button">プレビュー動画を保存</button>
   <h2>ダウンロード</h2><div class="downloads" id="downloads"></div>
 </section>
@@ -64,7 +61,25 @@ const result=document.querySelector('#result'),player=document.querySelector('#p
 const audioFile=document.querySelector('#audio-file'),uploadZone=document.querySelector('#upload-zone');
 const selection=document.querySelector('#selection'),selectedName=document.querySelector('#selected-name');
 const recordButton=document.querySelector('#record-audio'),progress=document.querySelector('#progress'),progressLabel=document.querySelector('#progress-label');
-let data=null,jobId=null,recording=null,audioContext=null,audioDestination=null,lineWindows=[];
+const progressMeter=document.querySelector('#progress-meter'),progressDetail=document.querySelector('#progress-detail');
+const phaseNames=['音声の準備','歌声の分離','歌詞の認識','音符と音高の推定','読みの確認','モーラ時刻の推定','楽譜データの組み立て','書き出し'];
+let jobCreatedAt=null,progressClock=null,currentStage='';
+function phaseIndex(stage){
+  if(/書き出し/.test(stage))return 7;
+  if(/組み立て/.test(stage))return 6;
+  if(/モーラ/.test(stage))return 5;
+  if(/読み/.test(stage))return 4;
+  if(/音符|音高/.test(stage))return 3;
+  if(/歌詞|誤認識/.test(stage))return 2;
+  if(/分離/.test(stage))return 1;
+  return 0;
+}
+function updateProgress(){
+  const index=phaseIndex(currentStage),elapsed=Math.max(0,Math.floor((Date.now()-(jobCreatedAt||Date.now()))/1000));
+  progressMeter.value=index;
+  progressDetail.textContent=`経過 ${Math.floor(elapsed/60)}:${String(elapsed%60).padStart(2,'0')}・残り: ${phaseNames.slice(index+1).join(' → ')||'完了待ち'}`;
+}
+let data=null,jobId=null,recording=null,audioContext=null,audioDestination=null,lineWindows=[],playbackChoice=0;
 player.addEventListener('error',()=>{
   if(jobId&&player.src.endsWith('/audio'))player.src=`/api/jobs/${jobId}/audio-wav`;
 });
@@ -129,7 +144,7 @@ form.addEventListener('submit',async event=>{
   event.preventDefault();
   if(!selectedFile){status.textContent='音声ファイルを選ぶか録音してください';return}
   if(micRecorder?.state==='recording'){status.textContent='録音を停止してから解析してください';return}
-  submit.disabled=true;status.textContent='アップロードしています…';progress.hidden=false;progressLabel.textContent='音声を送信しています';result.hidden=true;
+  submit.disabled=true;status.textContent='アップロードしています…';progress.hidden=false;progressLabel.textContent='音声を送信しています';currentStage='音声の準備';jobCreatedAt=Date.now();updateProgress();result.hidden=true;
   try{
     const body=new FormData(form);body.set('audio',selectedFile,selectedFile.name);
     const response=await json('/api/jobs',{method:'POST',body});jobId=response.id;
@@ -139,12 +154,16 @@ form.addEventListener('submit',async event=>{
 });
 async function loadJob(id){
   jobId=id;submit.disabled=true;progress.hidden=false;result.hidden=true;
+  if(progressClock)clearInterval(progressClock);progressClock=setInterval(updateProgress,1000);
   try{
     while(true){const state=await json(`/api/jobs/${jobId}`);
       if(state.state==='failed')throw Error(state.error||'解析に失敗しました');
       if(state.state==='done')break;
       status.textContent=state.state==='running'?'音源を解析しています…':'順番を待っています…';
       progressLabel.textContent=state.stage||'順番を待っています';
+      currentStage=state.stage||'音声の準備';
+      if(state.created)jobCreatedAt=Date.parse(state.created);
+      updateProgress();
       await pause(2000);
     }
     data=await json(`/api/jobs/${jobId}/score`);buildLineWindows();player.src=`/api/jobs/${jobId}/audio`;
@@ -156,7 +175,7 @@ async function loadJob(id){
       const a=document.createElement('a');a.className='link';a.href=`/api/jobs/${jobId}/download/${ext}`;a.download=`score.${ext}`;a.textContent=label;document.querySelector('#downloads').append(a);
     }
     result.hidden=false;status.textContent='解析が完了しました。';draw();result.scrollIntoView({behavior:'smooth'});
-  }catch(error){status.textContent=error.message}finally{progress.hidden=true;submit.disabled=false}
+  }catch(error){status.textContent=error.message}finally{progress.hidden=true;submit.disabled=false;clearInterval(progressClock);progressClock=null}
 }
 const rememberedJob=new URLSearchParams(location.search).get('job');
 if(rememberedJob&&/^[0-9a-f]{32}$/.test(rememberedJob))loadJob(rememberedJob);
@@ -173,11 +192,14 @@ function currentLine(t){
 }
 document.querySelector('#original-audio').addEventListener('click',()=>{
   if(!jobId)return;
+  playbackChoice++;
+  document.querySelector('#resing-status').textContent='元音源を再生中';
   const t=player.currentTime;player.src=`/api/jobs/${jobId}/audio`;player.currentTime=t;player.play();
 });
 document.querySelector('#resing-audio').addEventListener('click',async()=>{
   if(!jobId)return;
   const button=document.querySelector('#resing-audio'),message=document.querySelector('#resing-status');
+  const choice=++playbackChoice;
   button.disabled=true;
   try{
     await json(`/api/jobs/${jobId}/resing`,{method:'POST'});
@@ -185,12 +207,19 @@ document.querySelector('#resing-audio').addEventListener('click',async()=>{
       const state=await json(`/api/jobs/${jobId}/resing`);
       if(state.state==='done')break;
       if(state.state==='failed')throw Error(state.error||'歌唱合成に失敗しました');
-      message.textContent=state.stage||'歌唱合成の順番を待っています';
+      if(choice===playbackChoice)message.textContent=state.stage||'歌唱合成の順番を待っています';
       await pause(2000);
     }
+    button.textContent='VOICEVOXの歌声を再生';
+    if(choice!==playbackChoice)return;
     const t=player.currentTime;player.src=`/api/jobs/${jobId}/resing/audio`;
-    player.currentTime=t;await player.play();message.textContent='VOICEVOX:波音リツの歌声を再生中';
-  }catch(error){message.textContent=error.message}finally{button.disabled=false}
+    player.currentTime=t;await player.play();
+    if(choice===playbackChoice)message.textContent='VOICEVOX:波音リツの歌声を再生中';
+  }catch(error){if(choice===playbackChoice)message.textContent=error.message}finally{button.disabled=false}
+});
+player.addEventListener('ended',()=>{
+  const message=document.querySelector('#resing-status');
+  if(message.textContent.endsWith('再生中'))message.textContent='再生が終了しました';
 });
 function draw(){
   if(!data)return;const t=player.currentTime||0,w=canvas.width,h=canvas.height;
@@ -200,40 +229,54 @@ function draw(){
   const low=nearby.length?Math.min(...nearby.map(n=>n.pitch)):60;
   const high=nearby.length?Math.max(...nearby.map(n=>n.pitch)):72;
   const span=Math.max(24,high-low+8),minPitch=Math.floor((low+high-span)/2),maxPitch=minPitch+span;
-  const px=left=>w/2+(left-t)*125,py=p=>h-94-(p-minPitch)*((h-130)/span);
+  const px=left=>w/2+(left-t)*125,py=p=>h-130-(p-minPitch)*((h-165)/span);
   ctx.font='17px system-ui';ctx.textAlign='left';
   for(let p=minPitch;p<=maxPitch;p++){
     const y=py(p);ctx.strokeStyle=p%12===0?'#465575':'#25304a';ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(w,y);ctx.stroke();
-    if(p%12===0&&y>24&&y<h-100){ctx.fillStyle='#94a6c8';ctx.fillText(`C${Math.floor(p/12)-1}`,12,y-5)}
+    if(p%12===0&&y>24&&y<h-135){ctx.fillStyle='#94a6c8';ctx.fillText(`C${Math.floor(p/12)-1}`,12,y-5)}
   }
   for(let sec=Math.max(0,Math.floor(t-5));sec<t+6;sec++){
-    const x=px(sec);ctx.strokeStyle='#36415d';ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,h-88);ctx.stroke();
-    if(x>=0&&x<w-75){ctx.fillStyle='#9cabc7';ctx.fillText(fmt(sec),x+4,h-68)}
+    const x=px(sec);ctx.strokeStyle='#36415d';ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,h-120);ctx.stroke();
+    if(x>=0&&x<w-75){ctx.fillStyle='#9cabc7';ctx.fillText(fmt(sec),x+4,h-100)}
   }
   for(const note of data.notes){const x=px(note.start),right=px(note.end);if(right<0||x>w)continue;
     const y=py(note.pitch)-8;ctx.fillStyle=note.end<=t?'#4cbfa9':note.start<=t?'#8cf7cd':'#6784cc';
     ctx.fillRect(x,y,Math.max(2,right-x),16);ctx.strokeStyle='#c8e6ff';ctx.strokeRect(x,y,Math.max(2,right-x),16);
   }
-  ctx.strokeStyle='#ffcf70';ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(w/2,0);ctx.lineTo(w/2,h-88);ctx.stroke();ctx.lineWidth=1;
-  const active=currentLine(t),moraBox=document.querySelector('#moras'),timing=document.querySelector('#timing');
-  moraBox.hidden=!active;timing.hidden=!active;
-  if(active){const first=active.start,last=active.end;
-    const progress=Math.max(0,Math.min(1,(t-first)/(last-first)));
-    let fontSize=38;ctx.font=`bold ${fontSize}px system-ui`;
-    while(ctx.measureText(active.line.text).width>w-80&&fontSize>19){fontSize-=2;ctx.font=`bold ${fontSize}px system-ui`}
-    ctx.textAlign='center';ctx.lineWidth=7;
-    ctx.strokeStyle='#080b14';ctx.strokeText(active.line.text,w/2,h-20);
-    ctx.fillStyle='#e8ebf3';ctx.fillText(active.line.text,w/2,h-20);
-    const textWidth=ctx.measureText(active.line.text).width;
-    ctx.save();ctx.beginPath();ctx.rect((w-textWidth)/2,0,textWidth*progress,h);ctx.clip();
-    ctx.fillStyle='#7df6d1';ctx.fillText(active.line.text,w/2,h-20);ctx.restore();ctx.lineWidth=1;
-    const key=active.line.id;if(moraBox.dataset.line!==key){moraBox.dataset.line=key;moraBox.replaceChildren();
-      for(const m of active.moras){const span=document.createElement('span');span.className='mora';span.textContent=m.text;moraBox.append(span)}
-    }
-    [...moraBox.children].forEach((el,i)=>el.className='mora '+(active.moras[i].end<=t?'past':active.moras[i].start<=t?'on':''));
-    timing.textContent=active.moras.map(m=>`${m.text} ${fmt(m.start)}–${fmt(m.end)}`).join('　');
-  }else{moraBox.replaceChildren();moraBox.dataset.line='';timing.textContent=''}
+  ctx.strokeStyle='#ffcf70';ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(w/2,0);ctx.lineTo(w/2,h-120);ctx.stroke();ctx.lineWidth=1;
+  const active=currentLine(t);
+  if(active)drawCaption(active,t,w,h);
   requestAnimationFrame(draw);
+}
+function drawCaption(active,t,w,h){
+  const pieces=active.line.ruby||[{text:active.line.text,reading:''}];
+  const progress=Math.max(0,Math.min(1,(t-active.start)/(active.end-active.start)));
+  let size=38,widths=[];
+  function measure(){
+    widths=pieces.map(part=>{
+      ctx.font=`bold ${size}px system-ui`;const base=ctx.measureText(part.text).width;
+      ctx.font=`${Math.round(size*.48)}px system-ui`;
+      return Math.max(base,ctx.measureText(part.reading||'').width)+8;
+    });
+    return widths.reduce((sum,value)=>sum+value,0);
+  }
+  let total=measure();while(total>w-70&&size>20){size-=2;total=measure()}
+  const start=(w-total)/2,baseY=h-18,rubyY=baseY-size-6;
+  function paint(color){
+    ctx.fillStyle=color;ctx.strokeStyle='#080b14';ctx.textAlign='center';
+    let x=start;
+    pieces.forEach((part,index)=>{
+      const middle=x+widths[index]/2;
+      ctx.font=`bold ${size}px system-ui`;ctx.lineWidth=6;
+      ctx.strokeText(part.text,middle,baseY);ctx.fillText(part.text,middle,baseY);
+      if(part.reading){ctx.font=`${Math.round(size*.48)}px system-ui`;ctx.lineWidth=4;
+        ctx.strokeText(part.reading,middle,rubyY);ctx.fillText(part.reading,middle,rubyY)}
+      x+=widths[index];
+    });
+    ctx.lineWidth=1;
+  }
+  paint('#e8ebf3');ctx.save();ctx.beginPath();ctx.rect(start,0,total*progress,h);ctx.clip();
+  paint('#7df6d1');ctx.restore();
 }
 document.querySelector('#record').addEventListener('click',async()=>{
   if(!canvas.captureStream||!window.MediaRecorder){status.textContent='このブラウザは動画保存に対応していません';return}

@@ -6,6 +6,7 @@ from collections import defaultdict
 from io import BytesIO
 import json
 from pathlib import Path
+import subprocess
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 import wave
@@ -101,3 +102,18 @@ def synthesize(document: ScoreDocument, output: Path, *, engine_url: str,
         wav.setsampwidth(width)
         wav.setframerate(sample_rate)
         wav.writeframes(pcm)
+
+
+def mix_accompaniment(vocal: Path, accompaniment: Path) -> None:
+    """Overlay the separated instrumental on the synthesized voice."""
+    mixed = vocal.with_name(vocal.stem + "-mixed.wav")
+    try:
+        subprocess.run([
+            "ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(vocal),
+            "-i", str(accompaniment), "-filter_complex",
+            "[1:a]volume=0.7[bgm];[0:a][bgm]amix=inputs=2:duration=first:normalize=0[out]",
+            "-map", "[out]", "-c:a", "pcm_s16le", str(mixed),
+        ], check=True, capture_output=True)
+        mixed.replace(vocal)
+    finally:
+        mixed.unlink(missing_ok=True)
