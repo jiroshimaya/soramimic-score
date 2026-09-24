@@ -62,8 +62,9 @@ XF MIDIへの書き出しは未対応です。
 
 音声モデルの依存とWeb用の依存を入れ、SheetSage2とMERTのディレクトリを指定します。
 MP3などの読み込みにはFFmpegとFFprobeが必要です。音源・入力歌詞・解析結果は
-`SORAMIMIC_SCORE_DATA`以下に保存され、完了または失敗から24時間を過ぎると
+`SORAMIMIC_SCORE_DATA`以下に保存され、完了または失敗から1時間を過ぎると
 約5分間隔の掃除処理で削除されます。このディレクトリはGitの外に置いてください。
+解析結果の画面から手動で削除することもできます。
 
 ```sh
 uv sync --extra audio --extra web

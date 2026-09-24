@@ -149,7 +149,30 @@ class ScoreWebTests(unittest.TestCase):
     def test_guidelines_explain_retention(self):
         response = self.client.get("/guidelines")
         self.assertEqual(response.status_code, 200)
-        self.assertIn("約24時間", response.text)
+        self.assertIn("約1時間", response.text)
+
+    def test_finished_job_can_be_deleted_immediately(self):
+        with patch.dict("os.environ", {"SORAMIMIC_SCORE_SHEETSAGE_MODEL": "a",
+                                    "SORAMIMIC_SCORE_SHEETSAGE_BASE": "b"}):
+            job = self.submit().json()["id"]
+            for _ in range(100):
+                if self.client.get(f"/api/jobs/{job}").json()["state"] == "done":
+                    break
+                time.sleep(.02)
+        self.assertEqual(self.client.delete(f"/api/jobs/{job}").json(), {"deleted": True})
+        self.assertFalse((Path(self.temporary.name) / job).exists())
+        self.assertEqual(self.client.get(f"/api/jobs/{job}").status_code, 404)
+        self.assertEqual(self.client.get(f"/api/jobs/{job}/audio").status_code, 404)
+
+    def test_running_job_cannot_be_deleted(self):
+        root = Path(self.temporary.name)
+        job = "a" * 32
+        (root / job).mkdir()
+        with sqlite3.connect(root / "jobs.sqlite3") as connection:
+            connection.execute("INSERT INTO jobs(id,state,created,ip) VALUES(?,?,?,?)",
+                               (job, "running", "2026-09-24T00:00:00+00:00", "127.0.0.1"))
+        self.assertEqual(self.client.delete(f"/api/jobs/{job}").status_code, 409)
+        self.assertTrue((root / job).exists())
 
     def test_expired_result_and_audio_are_removed(self):
         with patch.dict("os.environ", {"SORAMIMIC_SCORE_SHEETSAGE_MODEL": "a",
