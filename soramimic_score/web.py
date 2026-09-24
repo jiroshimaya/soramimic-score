@@ -16,6 +16,7 @@ import wave
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, Response
 
+from .audio import AudioPipelineError
 from .document import load
 from .exports import EXPORTS
 from .models import ModelConfig
@@ -117,9 +118,17 @@ def create_app(*, data_root: Path | None = None, analyzer=None, public: bool | N
                 conn.execute("UPDATE jobs SET state='done' WHERE id=?", (job,))
         except Exception as exc:
             logger.exception("score analysis failed for job %s", job)
+            message = "解析に失敗しました。音源と設定を確認してください"
+            if isinstance(exc, AudioPipelineError):
+                if exc.stage == "melody" and "no melody notes were produced" in str(exc):
+                    message = "歌唱の音符を検出できませんでした。別の歌唱音源をお試しください"
+                elif exc.stage == "melody" and "At least two decoded beats" in str(exc):
+                    message = "音符の推定に必要な長さが足りません。長めの歌唱音源をお試しください"
+                elif exc.stage == "lyrics" and "no lyric lines were produced" in str(exc):
+                    message = "歌詞を認識できませんでした。歌声が聞こえる音源をお試しください"
             with sqlite3.connect(db) as conn:
                 conn.execute("UPDATE jobs SET state='failed', error=? WHERE id=?",
-                             ("解析に失敗しました。音源と設定を確認してください", job))
+                             (message, job))
 
     @app.get("/healthz")
     def health():
