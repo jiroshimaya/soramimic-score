@@ -10,6 +10,7 @@ from xml.etree import ElementTree
 
 from fastapi.testclient import TestClient
 
+from soramimic_score.audio import AudioPipelineError
 from soramimic_score.web import create_app
 from soramimic_score.exports import export_musicxml
 from tests.test_document import ScoreDocumentTests
@@ -84,6 +85,24 @@ class ScoreWebTests(unittest.TestCase):
     def test_private_job_requires_unguessable_id(self):
         self.assertEqual(self.client.get("/api/jobs/missing").status_code, 404)
         self.assertEqual(self.client.get("/api/jobs/" + "0" * 32 + "/audio").status_code, 404)
+
+    def test_missing_melody_reports_a_useful_error(self):
+        def no_melody(*args, **kwargs):
+            raise AudioPipelineError("melody", "no melody notes were produced")
+
+        with tempfile.TemporaryDirectory() as directory:
+            with TestClient(create_app(data_root=Path(directory), analyzer=no_melody)) as client:
+                with patch.dict("os.environ", {"SORAMIMIC_SCORE_SHEETSAGE_MODEL": "a",
+                                            "SORAMIMIC_SCORE_SHEETSAGE_BASE": "b"}):
+                    response = client.post("/api/jobs", files={"audio": ("song.wav", wav_bytes())})
+                    job = response.json()["id"]
+                    for _ in range(100):
+                        status = client.get(f"/api/jobs/{job}").json()
+                        if status["state"] == "failed":
+                            break
+                        time.sleep(.02)
+                self.assertEqual(status["state"], "failed")
+                self.assertIn("音符を検出できませんでした", status["error"])
 
     def test_musicxml_splits_long_note_across_measures(self):
         slot = replace(self.document.score.synthesis_plan[0], end_sec=4.5)
