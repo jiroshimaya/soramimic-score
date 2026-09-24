@@ -47,6 +47,7 @@ audio{width:100%;margin:14px 0}canvas{width:100%;height:auto;border-radius:12px;
 <section id="result" class="card" hidden>
   <h2>ピアノロール・歌詞プレビュー</h2>
   <audio id="player" controls preload="metadata"></audio>
+  <p class="details"><a id="result-link" href="#">この結果へのリンク</a>（約24時間有効）</p>
   <div><button class="secondary" id="original-audio" type="button">元音源を再生</button><button class="secondary" id="resing-audio" type="button">VOICEVOXで歌い直す</button><span class="details" id="resing-status" role="status"></span></div>
   <p class="details">歌い直しは音符と歌詞から波音リツで合成した単独の歌声です。VOICEVOX:波音リツ</p>
   <div class="screen"><canvas id="roll" width="1280" height="480" aria-label="音符とカラオケ字幕のピアノロール"></canvas></div>
@@ -131,20 +132,33 @@ form.addEventListener('submit',async event=>{
   try{
     const body=new FormData(form);body.set('audio',selectedFile,selectedFile.name);
     const response=await json('/api/jobs',{method:'POST',body});jobId=response.id;
-    while(true){await pause(2000);const state=await json(`/api/jobs/${jobId}`);
+    history.replaceState(null,'',`/?job=${jobId}`);
+    await loadJob(jobId);
+  }catch(error){status.textContent=error.message;progress.hidden=true;submit.disabled=false}
+});
+async function loadJob(id){
+  jobId=id;submit.disabled=true;progress.hidden=false;result.hidden=true;
+  try{
+    while(true){const state=await json(`/api/jobs/${jobId}`);
       if(state.state==='failed')throw Error(state.error||'解析に失敗しました');
       if(state.state==='done')break;
       status.textContent=state.state==='running'?'音源を解析しています…':'順番を待っています…';
       progressLabel.textContent=state.stage||'順番を待っています';
+      await pause(2000);
     }
     data=await json(`/api/jobs/${jobId}/score`);buildLineWindows();player.src=`/api/jobs/${jobId}/audio`;
+    document.querySelector('#result-link').href=`/?job=${jobId}`;
+    const voiceState=await json(`/api/jobs/${jobId}/resing`);
+    if(voiceState.state==='done')document.querySelector('#resing-audio').textContent='VOICEVOXの歌声を再生';
     document.querySelector('#downloads').replaceChildren();
     for(const [ext,label] of [['json','歌詞・音符JSON'],['mid','MIDI'],['musicxml','MusicXML'],['srt','SRT字幕'],['lrc','LRC歌詞']]){
       const a=document.createElement('a');a.className='link';a.href=`/api/jobs/${jobId}/download/${ext}`;a.download=`score.${ext}`;a.textContent=label;document.querySelector('#downloads').append(a);
     }
     result.hidden=false;status.textContent='解析が完了しました。';draw();result.scrollIntoView({behavior:'smooth'});
   }catch(error){status.textContent=error.message}finally{progress.hidden=true;submit.disabled=false}
-});
+}
+const rememberedJob=new URLSearchParams(location.search).get('job');
+if(rememberedJob&&/^[0-9a-f]{32}$/.test(rememberedJob))loadJob(rememberedJob);
 function buildLineWindows(){
   const byLine=new Map(data.lines.map(line=>[line.id,[]]));
   data.moras.forEach(m=>byLine.get(m.line)?.push(m));
