@@ -7,6 +7,7 @@
 :root{color-scheme:dark;font-family:system-ui,"Noto Sans JP",sans-serif;background:#0d1020;color:#f4f4fa}
 *{box-sizing:border-box}body{margin:0}main{max-width:1000px;margin:auto;padding:24px}
 h1{font-size:clamp(1.8rem,5vw,3rem);margin:.3em 0}p{line-height:1.65;color:#bbc1d4}
+.demo-label{display:inline-block;border:1px solid #79e2c4;border-radius:999px;padding:3px 10px;color:#a9f0da;font-size:.85rem;font-weight:800}
 .card{background:#191e32;border:1px solid #333c5c;border-radius:16px;padding:20px;margin:20px 0}
 label{display:block;font-weight:700;margin:16px 0 8px}input,textarea,button{font:inherit}
 input[type=file],textarea{width:100%;background:#101528;color:#fff;border:1px solid #596383;border-radius:9px;padding:12px}
@@ -27,7 +28,7 @@ audio{width:100%;margin:14px 0}canvas{width:100%;height:auto;border-radius:12px;
 .downloads{display:flex;flex-wrap:wrap}.details{color:#bfc6d9;font-size:.9rem}
 </style>
 <main>
-<header><h1>Soramimic Score</h1><p>歌唱音源から歌詞・モーラ時刻・音符を推定し、ピアノロールで確認できます。</p></header>
+<header><span class="demo-label">デモ GUI</span><h1>Soramimic Score</h1><p>これはSoramimic Scoreの機能をブラウザで試すためのデモGUIです。歌唱音源から歌詞・モーラ時刻・音符を推定し、ピアノロールで確認できます。</p></header>
 <form class="card" id="form">
   <div class="upload" id="upload-zone">
     <strong>歌唱音源をアップロード</strong>
