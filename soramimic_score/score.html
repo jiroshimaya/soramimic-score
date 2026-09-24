@@ -40,19 +40,20 @@ audio{width:100%;margin:14px 0}canvas{width:100%;height:auto;border-radius:12px;
   </div>
   <label for="lyrics-input">正解歌詞（任意、1行1フレーズ）</label>
   <textarea id="lyrics-input" name="lyrics" placeholder="入力すると解析結果に対応付けて字幕に表示します。空欄なら認識した歌詞を使います。"></textarea>
-  <p class="details">解析には時間がかかります。歌詞や音符には誤認識があり得ます。音源と結果は解析終了から約24時間後に自動削除します。<a href="/guidelines">利用ガイドライン</a></p>
+  <p class="details">解析には時間がかかります。歌詞や音符には誤認識があり得ます。音源と結果は解析終了から約1時間後に自動削除します。結果画面からすぐ削除することもできます。<a href="/guidelines">利用ガイドライン</a></p>
   <button id="submit">解析する</button><div id="status" role="status"></div>
   <div class="progress" id="progress" hidden><span class="spinner" aria-hidden="true"></span><div class="progress-body"><strong id="progress-label">準備しています</strong><progress class="progress-meter" id="progress-meter" max="8" value="0"></progress><small id="progress-detail">経過 0:00・残りの作業を確認しています</small></div></div>
 </form>
 <section id="result" class="card" hidden>
   <h2>ピアノロール・歌詞プレビュー</h2>
   <audio id="player" controls preload="metadata"></audio>
-  <p class="details"><a id="result-link" href="#">この結果へのリンク</a>（約24時間有効）</p>
+  <p class="details"><a id="result-link" href="#">この結果へのリンク</a>（約1時間有効）</p>
   <div><button class="secondary" id="original-audio" type="button">元音源を再生</button><button class="secondary" id="resing-audio" type="button">VOICEVOXで歌い直す</button><span class="details" id="resing-status" role="status"></span></div>
   <p class="details">歌い直しは音符と歌詞から波音リツで合成し、分離した伴奏を重ねます。VOICEVOX:波音リツ。分離前の結果では歌声のみです。</p>
   <div class="screen"><canvas id="roll" width="1280" height="480" aria-label="音符とカラオケ字幕のピアノロール"></canvas></div>
   <button class="secondary" id="record" type="button">プレビュー動画を保存</button>
   <h2>ダウンロード</h2><div class="downloads" id="downloads"></div>
+  <button class="secondary" id="delete-job" type="button">音源と結果を削除</button>
 </section>
 </main>
 <script>
@@ -195,6 +196,16 @@ document.querySelector('#original-audio').addEventListener('click',()=>{
   playbackChoice++;
   document.querySelector('#resing-status').textContent='元音源を再生中';
   const t=player.currentTime;player.src=`/api/jobs/${jobId}/audio`;player.currentTime=t;player.play();
+});
+document.querySelector('#delete-job').addEventListener('click',async()=>{
+  if(!jobId||!window.confirm('この音源と解析結果をサーバーから削除します。よろしいですか？'))return;
+  const button=document.querySelector('#delete-job');button.disabled=true;
+  try{
+    await json(`/api/jobs/${jobId}`,{method:'DELETE'});
+    playbackChoice++;player.pause();player.removeAttribute('src');player.load();
+    data=null;jobId=null;lineWindows=[];result.hidden=true;
+    history.replaceState(null,'','/');status.textContent='音源と解析結果を削除しました。';
+  }catch(error){status.textContent=error.message}finally{button.disabled=false}
 });
 document.querySelector('#resing-audio').addEventListener('click',async()=>{
   if(!jobId)return;

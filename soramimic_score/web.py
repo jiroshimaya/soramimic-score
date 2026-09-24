@@ -28,7 +28,7 @@ from .media import AUDIO_SUFFIXES, decode_audio, probe_audio
 MAX_WAV_BYTES = 100 * 1024 * 1024
 MAX_DURATION_SEC = 15 * 60
 QUOTA_PER_DAY = 100
-RETENTION_SEC = 24 * 3600
+RETENTION_SEC = 3600
 logger = logging.getLogger(__name__)
 
 
@@ -273,6 +273,25 @@ def create_app(*, data_root: Path | None = None, analyzer=None, public: bool | N
             raise HTTPException(404)
         return {"id": job, "state": row[0], "error": row[1], "stage": row[2],
                 "created": row[3]}
+
+    @app.delete("/api/jobs/{job}")
+    def delete_job(job: str):
+        job = _job_id(job)
+        with sqlite3.connect(db, timeout=30, isolation_level=None) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT state,synth_state FROM jobs WHERE id=?",
+                               (job,)).fetchone()
+            if row is None:
+                raise HTTPException(404)
+            if row[0] in ("queued", "running") or row[1] in ("queued", "running"):
+                raise HTTPException(409, "処理中は削除できません。完了後にもう一度お試しください")
+            try:
+                shutil.rmtree(root / job)
+            except FileNotFoundError:
+                pass
+            conn.execute("DELETE FROM jobs WHERE id=?", (job,))
+            conn.commit()
+        return {"deleted": True}
 
     @app.get("/api/jobs/{job}/score")
     def score(job: str):
