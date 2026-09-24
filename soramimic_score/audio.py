@@ -389,6 +389,16 @@ def analyze_audio(
     notes = _validate_notes(_run_adapter("melody", adapters.melody_transcriber, path))
     recognized_lines = []
     semantic_evidence = []
+    credit_recovered: set[LyricLine] = set()
+
+    def readable(text: str) -> bool:
+        if adapters.lyric_reading is None:
+            return True
+        try:
+            return bool(kana_to_moras(adapters.lyric_reading(text)))
+        except (ValueError, TypeError):
+            return False
+
     if lyrics is None:
         raw_recognized, merges = coalesce_repeated_suffix_fragments(raw_recognized)
         for left, right in merges:
@@ -412,6 +422,14 @@ def analyze_audio(
                 f"audio-repetition-runaway-{index}", "soramimic_score.local_recovery",
                 "lyric-repetition-rejection", 0.0,
                 {"source_segment_index": index, "surface": line.text},
+            ))
+            continue
+        if lyrics is None and family is None and not readable(line.text):
+            semantic_evidence.append(Evidence(
+                f"audio-unreadable-asr-{index}", "soramimic_score.readings",
+                "lyric-semantic-gate", 0.0,
+                {"source_segment_index": index, "surface": line.text,
+                 "status": "rejected", "reason": "unpronounceable"},
             ))
             continue
         if (lyrics is None and family is None and activity is not None
@@ -447,8 +465,10 @@ def analyze_audio(
                                  and start <= candidate.start_sec < candidate.end_sec <= end
                                  and non_lyric_template_family(candidate.text) is None
                                  and not is_pathological_repeated_vocalization(candidate, notes)
+                                 and readable(candidate.text)
                                  and has_melodic_support(candidate, notes))
         recognized_lines.extend(recovered)
+        credit_recovered.update(recovered)
         semantic_evidence.append(Evidence(
             f"audio-credit-gate-{index}", "soramimic_score.semantic",
             "lyric-semantic-gate", 0.0,
@@ -509,6 +529,7 @@ def analyze_audio(
                          and start <= candidate.start_sec < candidate.end_sec <= end
                          and non_lyric_template_family(candidate.text) is None
                          and not is_pathological_repeated_vocalization(candidate, notes)
+                         and readable(candidate.text)
                          and has_melodic_support(candidate, notes))
 
         if on_progress:
@@ -598,7 +619,8 @@ def analyze_audio(
         rejected = []
         for index, line in enumerate(lines):
             family = non_lyric_template_family(line.text)
-            if family is None or family in {"credits", "stock-media-credit"}:
+            if (family is None and line not in credit_recovered
+                    or family in {"credits", "stock-media-credit"}):
                 continue
             scores = [mora.confidence for mora in moras if mora.line_index == index]
             median_score = statistics.median(scores) if scores else 0.0
@@ -609,7 +631,8 @@ def analyze_audio(
                 f"audio-ctc-template-{index}", "soramimic_score.semantic",
                 "lyric-semantic-gate", 0.0,
                 {"source_segment_index": index, "surface": line.text,
-                 "template_family": family, "ctc_median_score": median_score,
+                 "template_family": family, "credit_recovery": line in credit_recovered,
+                 "ctc_median_score": median_score,
                  "status": "rejected"},
             ))
         if rejected:
@@ -632,6 +655,7 @@ def analyze_audio(
                                     and start <= candidate.start_sec < candidate.end_sec <= end
                                     and non_lyric_template_family(candidate.text) is None
                                     and not is_pathological_repeated_vocalization(candidate, notes)
+                                    and readable(candidate.text)
                                     and has_melodic_support(candidate, notes))
             lines = _validate_lines(sorted(retained, key=lambda item: item.start_sec), timed=True)
             readings = _validate_readings(
