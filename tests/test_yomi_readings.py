@@ -118,7 +118,10 @@ class RealYomiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             audio = root / "input.wav"
-            audio.touch()
+            import wave
+            with wave.open(str(audio), "wb") as wav:
+                wav.setnchannels(1); wav.setsampwidth(2); wav.setframerate(16000)
+                wav.writeframes(b"\0\0" * 1600)
             for name in ("config.json", "model.safetensors", "LICENSE"):
                 (root / name).touch()
             config = ModelConfig(root, root, separate_vocals=False, acoustic_readings=False)

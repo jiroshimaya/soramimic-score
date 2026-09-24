@@ -11,6 +11,8 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 import math
+import re
+import unicodedata
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -101,6 +103,23 @@ class AudioPipelineError(RuntimeError):
     def __init__(self, stage: str, detail: str):
         self.stage = stage
         super().__init__(f"{stage}: {detail}")
+
+
+_CREDIT_ROLE = re.compile(r"作詞|作曲|編曲|歌唱|ボーカル|lyrics|music|arrangement|vocal", re.I)
+_CREDIT_PREFIX = re.compile(
+    r"^(?:字幕(?:制作|製作|提供|翻訳)|翻訳[・/ ]?字幕|subtitles?\s+by|"
+    r"(?:作詞|作曲|編曲|歌唱|ボーカル|lyrics|music|arrangement|vocal)\s*[:：])",
+    re.I,
+)
+
+
+def is_credit_hallucination(text: str) -> bool:
+    """Recognize credit-like ASR lines without censoring ordinary lyric words."""
+    value = unicodedata.normalize("NFKC", text).strip()
+    if _CREDIT_PREFIX.search(value):
+        return True
+    roles = {match.group().lower() for match in _CREDIT_ROLE.finditer(value)}
+    return len(roles) >= 2 and bool(re.search(r"[・/&]|\s", value))
 
 
 def _run_adapter(stage: str, adapter: Callable[..., Sequence[object]], *args: object):
@@ -317,6 +336,7 @@ def analyze_audio(
     lyrics: Sequence[str] | None = None,
     model_config: ModelConfig | None = None,
     adjust_lyrics: bool = False,
+    on_progress: Callable[[str], None] | None = None,
 ) -> ScoreDocument:
     """Locate lyrics with ASR, fix pronunciation, then align the final reading.
 
@@ -337,10 +357,17 @@ def analyze_audio(
         raise ValueError("adjust_lyrics requires supplied lyrics")
     if adapters is None:
         from .models import prepared_adapters
+        from .media import decoded_audio
         if model_config is None:
             raise ValueError("model_config with local SheetSage2 directories is required")
-        with prepared_adapters(path, model_config) as prepared:
-            return analyze_audio(path, prepared, lyrics=lyrics, adjust_lyrics=adjust_lyrics)
+        if on_progress:
+            on_progress("音声を読み込んでいます")
+        with decoded_audio(path) as prepared_path:
+            if on_progress and model_config.separate_vocals:
+                on_progress("歌声を分離しています")
+            with prepared_adapters(prepared_path, model_config) as prepared:
+                return analyze_audio(prepared_path, prepared, lyrics=lyrics,
+                                     adjust_lyrics=adjust_lyrics, on_progress=on_progress)
 
     if lyrics is not None:
         if isinstance(lyrics, (str, bytes)):
@@ -348,8 +375,11 @@ def analyze_audio(
         _validate_lines(tuple(LyricLine(text) for text in lyrics), timed=False)
     if adapters.lyric_recognizer is None:
         raise AudioPipelineError("lyrics", "ASR-first analysis requires a recognizer")
+    if on_progress:
+        on_progress("歌詞を認識しています")
     recognized = _validate_lines(
-        _run_adapter("lyrics", adapters.lyric_recognizer, path), timed=True,
+        tuple(line for line in _run_adapter("lyrics", adapters.lyric_recognizer, path)
+              if not is_credit_hallucination(line.text)), timed=True,
     )
     adjustment, overlay = None, None
     lines = recognized
@@ -377,6 +407,8 @@ def analyze_audio(
 
     # Only the final text reaches the selector. Its closed candidates contain
     # no pronunciation copied from a different recognized surface.
+    if on_progress:
+        on_progress("歌詞の読みを確認しています")
     readings = _validate_readings(
         lines, _run_adapter("readings", adapters.reading_selector, path, lines),
     )
@@ -389,10 +421,16 @@ def analyze_audio(
         overlay["readings_fixed_before_alignment"] = True
     lines = tuple(replace(line, text=strip_ruby(line.text)) for line in lines)
     # A failure is reported. Do not fall back to the rejected ASR pronunciation.
+    if on_progress:
+        on_progress("モーラの時刻を推定しています")
     moras = _validate_moras(
         readings, _run_adapter("mora alignment", adapters.mora_aligner, path, lines, readings),
     )
+    if on_progress:
+        on_progress("音符と音高を推定しています")
     notes = _validate_notes(_run_adapter("melody", adapters.melody_transcriber, path))
+    if on_progress:
+        on_progress("楽譜データを組み立てています")
     observations = build_audio_observations(lines, readings, moras, notes)
     if adjustment is not None:
         observations = replace(observations, evidence=observations.evidence + (Evidence(

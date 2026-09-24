@@ -13,28 +13,45 @@ input[type=file],textarea{width:100%;background:#101528;color:#fff;border:1px so
 textarea{min-height:130px;resize:vertical}button,.link{display:inline-block;background:#79e2c4;color:#102323;border:0;border-radius:9px;padding:11px 17px;text-decoration:none;font-weight:800;cursor:pointer;margin:7px 7px 0 0}
 button:disabled{opacity:.45;cursor:wait}.secondary{background:#343d5c;color:#f5f5ff}
 #status{min-height:1.7em;color:#96e6d0}#result[hidden]{display:none}
+.upload{border:2px dashed #65768d;border-radius:14px;padding:28px 18px;text-align:center;background:#111a2d;transition:background .15s,border-color .15s}
+.upload.drag-over{background:#19394b;border-color:#79e2c4}.upload p{margin:8px 0}.upload button{margin:9px 4px 0}
+.upload strong{font-size:1.1rem}.selection{display:flex;align-items:center;justify-content:center;gap:10px;margin:12px 0 0;color:#a9f0da;overflow-wrap:anywhere}
+.selection button{padding:4px 9px;background:#343d5c;color:#fff}.recording{background:#e6a1aa;color:#35131b}
+.progress{display:flex;align-items:center;gap:13px;margin-top:16px;padding:13px 15px;border-radius:10px;background:#111a2d;color:#d2f9ec}
+.progress[hidden],.selection[hidden]{display:none}.spinner{width:20px;height:20px;border:3px solid #6a927f;border-top-color:#91ffcf;border-radius:50%;animation:spin .9s linear infinite;flex:none}
+@keyframes spin{to{transform:rotate(360deg)}}.progress small{display:block;color:#aab8c8;margin-top:3px}
 audio{width:100%;margin:14px 0}canvas{width:100%;height:auto;border-radius:12px;background:#0b1228;border:1px solid #354166}
-.screen{position:relative}.lyrics{position:absolute;bottom:14px;left:2%;width:96%;text-align:center;font-size:clamp(20px,4vw,36px);font-weight:900;text-shadow:0 2px 6px #000,0 0 10px #000;pointer-events:none;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.lyrics .base{color:#e8ebf3}.lyrics .active{position:absolute;left:0;top:0;color:#7df6d1;overflow:hidden;white-space:nowrap;width:0;text-align:left}
+.screen{position:relative}
 .moras{display:flex;flex-wrap:wrap;gap:5px;min-height:44px;margin:12px 0}.mora{padding:5px 8px;border:1px solid #526080;border-radius:6px;color:#a8b4c9}.mora.on{background:#7df6d1;color:#132824;border-color:#7df6d1}.mora.past{color:#7df6d1}
+.moras[hidden],#timing[hidden]{display:none}
 .downloads{display:flex;flex-wrap:wrap}.details{color:#bfc6d9;font-size:.9rem}
 </style>
 <main>
-<header><h1>Soramimic Score</h1><p>歌唱WAVから歌詞・モーラ時刻・音符を推定し、ピアノロールで確認できます。</p></header>
+<header><h1>Soramimic Score</h1><p>歌唱音源から歌詞・モーラ時刻・音符を推定し、ピアノロールで確認できます。</p></header>
 <form class="card" id="form">
-  <label for="audio-file">歌唱音源（PCM WAV、15分・100 MBまで）</label>
-  <input type="file" id="audio-file" name="audio" accept=".wav,audio/wav" required>
+  <div class="upload" id="upload-zone">
+    <strong>歌唱音源をアップロード</strong>
+    <p>ここに音声ファイルをドロップ、または選択してください</p>
+    <button id="choose-audio" type="button">＋ 音声ファイルを選ぶ</button>
+    <button id="record-audio" class="secondary" type="button">● 録音する</button>
+    <input type="file" id="audio-file" accept="audio/*,.wav,.mp3,.m4a,.mp4,.flac,.ogg,.opus,.aac,.aif,.aiff,.wma,.webm" hidden>
+    <div class="selection" id="selection" hidden><span id="selected-name" role="status"></span><button type="button" id="clear-audio" aria-label="音源の選択を解除">×</button></div>
+    <p class="details">MP3・M4A・WAVなど／15分・100 MBまで</p>
+  </div>
   <label for="lyrics-input">正解歌詞（任意、1行1フレーズ）</label>
   <textarea id="lyrics-input" name="lyrics" placeholder="入力すると解析結果に対応付けて字幕に表示します。空欄なら認識した歌詞を使います。"></textarea>
-  <p class="details">解析には時間がかかります。歌詞や音符には誤認識があり得るため、書き出す前に確認してください。</p>
+  <p class="details">解析には時間がかかります。歌詞や音符には誤認識があり得ます。音源と結果は解析終了から約24時間後に自動削除します。<a href="/guidelines">利用ガイドライン</a></p>
   <button id="submit">解析する</button><div id="status" role="status"></div>
+  <div class="progress" id="progress" hidden><span class="spinner" aria-hidden="true"></span><div><strong id="progress-label">準備しています</strong><small>段階ごとに進みます。所要時間は音源によって異なります。</small></div></div>
 </form>
 <section id="result" class="card" hidden>
   <h2>ピアノロール・歌詞プレビュー</h2>
   <audio id="player" controls preload="metadata"></audio>
-  <div class="screen"><canvas id="roll" width="1280" height="560"></canvas><div class="lyrics"><span class="base" id="line-base"></span><span class="active" id="line-active"></span></div></div>
-  <div class="moras" id="moras"></div>
-  <p class="details" id="timing"></p>
+  <div><button class="secondary" id="original-audio" type="button">元音源を再生</button><button class="secondary" id="resing-audio" type="button">VOICEVOXで歌い直す</button><span class="details" id="resing-status" role="status"></span></div>
+  <p class="details">歌い直しは音符と歌詞から波音リツで合成した単独の歌声です。VOICEVOX:波音リツ</p>
+  <div class="screen"><canvas id="roll" width="1280" height="480" aria-label="音符とカラオケ字幕のピアノロール"></canvas></div>
+  <div class="moras" id="moras" hidden></div>
+  <p class="details" id="timing" hidden></p>
   <button class="secondary" id="record" type="button">プレビュー動画を保存</button>
   <h2>ダウンロード</h2><div class="downloads" id="downloads"></div>
 </section>
@@ -42,68 +59,165 @@ audio{width:100%;margin:14px 0}canvas{width:100%;height:auto;border-radius:12px;
 <script>
 const form=document.querySelector('#form'),status=document.querySelector('#status'),submit=document.querySelector('#submit');
 const result=document.querySelector('#result'),player=document.querySelector('#player'),canvas=document.querySelector('#roll'),ctx=canvas.getContext('2d');
-let data=null,jobId=null,recording=null,audioContext=null,audioDestination=null;
+const audioFile=document.querySelector('#audio-file'),uploadZone=document.querySelector('#upload-zone');
+const selection=document.querySelector('#selection'),selectedName=document.querySelector('#selected-name');
+const recordButton=document.querySelector('#record-audio'),progress=document.querySelector('#progress'),progressLabel=document.querySelector('#progress-label');
+let data=null,jobId=null,recording=null,audioContext=null,audioDestination=null,lineWindows=[];
+player.addEventListener('error',()=>{
+  if(jobId&&player.src.endsWith('/audio'))player.src=`/api/jobs/${jobId}/audio-wav`;
+});
+let selectedFile=null,micRecorder=null,micStream=null,recordTimer=null;
 const fmt=t=>`${Math.floor(t/60)}:${String(Math.floor(t%60)).padStart(2,'0')}.${String(Math.floor((t%1)*100)).padStart(2,'0')}`;
 const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 async function json(url,options){const response=await fetch(url,options);const value=await response.json();if(!response.ok)throw Error(value.detail||'通信エラー');return value}
-form.addEventListener('submit',async event=>{
-  event.preventDefault();submit.disabled=true;status.textContent='アップロードしています…';result.hidden=true;
+function chooseFile(file){
+  if(!file)return;
+  if(!/\.(wav|wave|mp3|m4a|mp4|flac|ogg|opus|aac|aif|aiff|wma|webm)$/i.test(file.name)){
+    status.textContent='MP3、M4A、WAVなどの音声ファイルを選んでください';return;
+  }
+  if(file.size>100*1024*1024){status.textContent='音声ファイルは100 MB以下にしてください';return}
+  selectedFile=file;selectedName.textContent=file.name;selection.hidden=false;status.textContent='';
+}
+document.querySelector('#choose-audio').addEventListener('click',()=>audioFile.click());
+audioFile.addEventListener('change',()=>chooseFile(audioFile.files[0]));
+document.querySelector('#clear-audio').addEventListener('click',()=>{
+  selectedFile=null;audioFile.value='';selection.hidden=true;status.textContent='';
+});
+let dragDepth=0;
+uploadZone.addEventListener('dragenter',event=>{
+  if(![...(event.dataTransfer?.types||[])].includes('Files'))return;
+  event.preventDefault();dragDepth++;uploadZone.classList.add('drag-over');
+});
+uploadZone.addEventListener('dragover',event=>{
+  if(![...(event.dataTransfer?.types||[])].includes('Files'))return;
+  event.preventDefault();if(event.dataTransfer)event.dataTransfer.dropEffect='copy';
+});
+uploadZone.addEventListener('dragleave',()=>{dragDepth=Math.max(0,dragDepth-1);if(!dragDepth)uploadZone.classList.remove('drag-over')});
+uploadZone.addEventListener('drop',event=>{
+  event.preventDefault();dragDepth=0;uploadZone.classList.remove('drag-over');
+  const files=[...(event.dataTransfer?.files||[])];
+  if(files.length!==1){status.textContent='音声ファイルを1つだけドロップしてください';return}
+  chooseFile(files[0]);
+});
+recordButton.addEventListener('click',async()=>{
+  if(micRecorder?.state==='recording'){micRecorder.stop();return}
+  if(!navigator.mediaDevices?.getUserMedia||!window.MediaRecorder){status.textContent='このブラウザは録音に対応していません';return}
+  recordButton.disabled=true;
   try{
-    const response=await json('/api/jobs',{method:'POST',body:new FormData(form)});jobId=response.id;
+    micStream=await navigator.mediaDevices.getUserMedia({audio:true});
+    const mime=['audio/webm;codecs=opus','audio/mp4','audio/ogg;codecs=opus'].find(type=>MediaRecorder.isTypeSupported(type));
+    micRecorder=new MediaRecorder(micStream,mime?{mimeType:mime}:undefined);
+    const chunks=[];
+    micRecorder.ondataavailable=event=>{if(event.data.size)chunks.push(event.data)};
+    micRecorder.onstop=()=>{
+      clearTimeout(recordTimer);micStream.getTracks().forEach(track=>track.stop());micStream=null;
+      recordButton.classList.remove('recording');recordButton.textContent='● 録音する';
+      const type=micRecorder.mimeType||mime||'audio/webm';
+      const ext=type.includes('mp4')?'m4a':type.includes('ogg')?'ogg':'webm';
+      if(chunks.length)chooseFile(new File(chunks,`recording.${ext}`,{type}));
+      else status.textContent='録音データを取得できませんでした';
+    };
+    micRecorder.start(1000);recordButton.classList.add('recording');recordButton.textContent='■ 録音を停止';
+    status.textContent='録音中です。停止後に「解析する」を押してください';
+    recordTimer=setTimeout(()=>{if(micRecorder.state==='recording')micRecorder.stop()},15*60*1000);
+  }catch(error){micStream?.getTracks().forEach(track=>track.stop());status.textContent='マイクを使えませんでした。ブラウザの許可を確認してください'}
+  finally{recordButton.disabled=false}
+});
+form.addEventListener('submit',async event=>{
+  event.preventDefault();
+  if(!selectedFile){status.textContent='音声ファイルを選ぶか録音してください';return}
+  if(micRecorder?.state==='recording'){status.textContent='録音を停止してから解析してください';return}
+  submit.disabled=true;status.textContent='アップロードしています…';progress.hidden=false;progressLabel.textContent='音声を送信しています';result.hidden=true;
+  try{
+    const body=new FormData(form);body.set('audio',selectedFile,selectedFile.name);
+    const response=await json('/api/jobs',{method:'POST',body});jobId=response.id;
     while(true){await pause(2000);const state=await json(`/api/jobs/${jobId}`);
       if(state.state==='failed')throw Error(state.error||'解析に失敗しました');
       if(state.state==='done')break;
       status.textContent=state.state==='running'?'音源を解析しています…':'順番を待っています…';
+      progressLabel.textContent=state.stage||'順番を待っています';
     }
-    data=await json(`/api/jobs/${jobId}/score`);player.src=`/api/jobs/${jobId}/audio`;
+    data=await json(`/api/jobs/${jobId}/score`);buildLineWindows();player.src=`/api/jobs/${jobId}/audio`;
     document.querySelector('#downloads').replaceChildren();
     for(const [ext,label] of [['json','歌詞・音符JSON'],['mid','MIDI'],['musicxml','MusicXML'],['srt','SRT字幕'],['lrc','LRC歌詞']]){
       const a=document.createElement('a');a.className='link';a.href=`/api/jobs/${jobId}/download/${ext}`;a.download=`score.${ext}`;a.textContent=label;document.querySelector('#downloads').append(a);
     }
     result.hidden=false;status.textContent='解析が完了しました。';draw();result.scrollIntoView({behavior:'smooth'});
-  }catch(error){status.textContent=error.message}finally{submit.disabled=false}
+  }catch(error){status.textContent=error.message}finally{progress.hidden=true;submit.disabled=false}
 });
-function currentLine(t){
+function buildLineWindows(){
   const byLine=new Map(data.lines.map(line=>[line.id,[]]));
   data.moras.forEach(m=>byLine.get(m.line)?.push(m));
-  const line=data.lines.find(line=>byLine.get(line.id).some(m=>m.start<=t&&t<m.end));
-  return line?{line,moras:byLine.get(line.id)}:null;
+  lineWindows=data.lines.map(line=>{
+    const moras=byLine.get(line.id).sort((a,b)=>a.start-b.start);
+    return moras.length?{line,moras,start:moras[0].start,end:Math.max(...moras.map(m=>m.end))}:null;
+  }).filter(Boolean).sort((a,b)=>a.start-b.start);
 }
+function currentLine(t){
+  return lineWindows.find(item=>item.start<=t&&t<item.end)||null;
+}
+document.querySelector('#original-audio').addEventListener('click',()=>{
+  if(!jobId)return;
+  const t=player.currentTime;player.src=`/api/jobs/${jobId}/audio`;player.currentTime=t;player.play();
+});
+document.querySelector('#resing-audio').addEventListener('click',async()=>{
+  if(!jobId)return;
+  const button=document.querySelector('#resing-audio'),message=document.querySelector('#resing-status');
+  button.disabled=true;
+  try{
+    await json(`/api/jobs/${jobId}/resing`,{method:'POST'});
+    while(true){
+      const state=await json(`/api/jobs/${jobId}/resing`);
+      if(state.state==='done')break;
+      if(state.state==='failed')throw Error(state.error||'歌唱合成に失敗しました');
+      message.textContent=state.stage||'歌唱合成の順番を待っています';
+      await pause(2000);
+    }
+    const t=player.currentTime;player.src=`/api/jobs/${jobId}/resing/audio`;
+    player.currentTime=t;await player.play();message.textContent='VOICEVOX:波音リツの歌声を再生中';
+  }catch(error){message.textContent=error.message}finally{button.disabled=false}
+});
 function draw(){
   if(!data)return;const t=player.currentTime||0,w=canvas.width,h=canvas.height;
   ctx.fillStyle='#10172d';ctx.fillRect(0,0,w,h);
-  const minPitch=Math.min(48,...data.notes.map(n=>n.pitch))-2,maxPitch=Math.max(84,...data.notes.map(n=>n.pitch))+2;
-  const px=left=>w/2+(left-t)*125,py=p=>h-80-(p-minPitch)*((h-135)/(maxPitch-minPitch));
+  const visible=data.notes.filter(n=>n.end>=t-5&&n.start<=t+5&&Number.isFinite(n.pitch));
+  const nearby=visible.length?visible:data.notes.filter(n=>Number.isFinite(n.pitch));
+  const low=nearby.length?Math.min(...nearby.map(n=>n.pitch)):60;
+  const high=nearby.length?Math.max(...nearby.map(n=>n.pitch)):72;
+  const span=Math.max(24,high-low+8),minPitch=Math.floor((low+high-span)/2),maxPitch=minPitch+span;
+  const px=left=>w/2+(left-t)*125,py=p=>h-94-(p-minPitch)*((h-130)/span);
   ctx.font='17px system-ui';ctx.textAlign='left';
   for(let p=minPitch;p<=maxPitch;p++){
     const y=py(p);ctx.strokeStyle=p%12===0?'#465575':'#25304a';ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(w,y);ctx.stroke();
-    if(p%12===0){ctx.fillStyle='#94a6c8';ctx.fillText(`C${Math.floor(p/12)-1}`,12,y-5)}
+    if(p%12===0&&y>24&&y<h-100){ctx.fillStyle='#94a6c8';ctx.fillText(`C${Math.floor(p/12)-1}`,12,y-5)}
   }
   for(let sec=Math.max(0,Math.floor(t-5));sec<t+6;sec++){
-    const x=px(sec);ctx.strokeStyle='#36415d';ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,h-70);ctx.stroke();
-    ctx.fillStyle='#9cabc7';ctx.fillText(fmt(sec),x+4,h-46)
+    const x=px(sec);ctx.strokeStyle='#36415d';ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,h-88);ctx.stroke();
+    if(x>=0&&x<w-75){ctx.fillStyle='#9cabc7';ctx.fillText(fmt(sec),x+4,h-68)}
   }
   for(const note of data.notes){const x=px(note.start),right=px(note.end);if(right<0||x>w)continue;
-    const y=py(note.pitch)-10;ctx.fillStyle=note.end<=t?'#4cbfa9':note.start<=t?'#8cf7cd':'#6784cc';
-    ctx.fillRect(x,y,Math.max(2,right-x),20);ctx.strokeStyle='#c8e6ff';ctx.strokeRect(x,y,Math.max(2,right-x),20);
+    const y=py(note.pitch)-8;ctx.fillStyle=note.end<=t?'#4cbfa9':note.start<=t?'#8cf7cd':'#6784cc';
+    ctx.fillRect(x,y,Math.max(2,right-x),16);ctx.strokeStyle='#c8e6ff';ctx.strokeRect(x,y,Math.max(2,right-x),16);
   }
-  ctx.strokeStyle='#ffcf70';ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(w/2,0);ctx.lineTo(w/2,h-70);ctx.stroke();ctx.lineWidth=1;
-  const active=currentLine(t),base=document.querySelector('#line-base'),fill=document.querySelector('#line-active'),moraBox=document.querySelector('#moras');
-  base.textContent=active?.line.text||'';fill.textContent=active?.line.text||'';
-  if(active){const first=active.moras[0].start,last=active.moras.at(-1).end;
+  ctx.strokeStyle='#ffcf70';ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(w/2,0);ctx.lineTo(w/2,h-88);ctx.stroke();ctx.lineWidth=1;
+  const active=currentLine(t),moraBox=document.querySelector('#moras'),timing=document.querySelector('#timing');
+  moraBox.hidden=!active;timing.hidden=!active;
+  if(active){const first=active.start,last=active.end;
     const progress=Math.max(0,Math.min(1,(t-first)/(last-first)));
-    fill.style.width=`${progress*100}%`;
-    ctx.font='bold 38px system-ui';ctx.textAlign='center';ctx.lineWidth=7;
-    ctx.strokeStyle='#080b14';ctx.strokeText(active.line.text,w/2,h-100);
-    ctx.fillStyle='#e8ebf3';ctx.fillText(active.line.text,w/2,h-100);
-    ctx.save();ctx.beginPath();ctx.rect(0,0,w/2+ctx.measureText(active.line.text).width*(progress-.5),h);ctx.clip();
-    ctx.fillStyle='#7df6d1';ctx.fillText(active.line.text,w/2,h-100);ctx.restore();ctx.lineWidth=1;
+    let fontSize=38;ctx.font=`bold ${fontSize}px system-ui`;
+    while(ctx.measureText(active.line.text).width>w-80&&fontSize>19){fontSize-=2;ctx.font=`bold ${fontSize}px system-ui`}
+    ctx.textAlign='center';ctx.lineWidth=7;
+    ctx.strokeStyle='#080b14';ctx.strokeText(active.line.text,w/2,h-20);
+    ctx.fillStyle='#e8ebf3';ctx.fillText(active.line.text,w/2,h-20);
+    const textWidth=ctx.measureText(active.line.text).width;
+    ctx.save();ctx.beginPath();ctx.rect((w-textWidth)/2,0,textWidth*progress,h);ctx.clip();
+    ctx.fillStyle='#7df6d1';ctx.fillText(active.line.text,w/2,h-20);ctx.restore();ctx.lineWidth=1;
     const key=active.line.id;if(moraBox.dataset.line!==key){moraBox.dataset.line=key;moraBox.replaceChildren();
       for(const m of active.moras){const span=document.createElement('span');span.className='mora';span.textContent=m.text;moraBox.append(span)}
     }
     [...moraBox.children].forEach((el,i)=>el.className='mora '+(active.moras[i].end<=t?'past':active.moras[i].start<=t?'on':''));
-    document.querySelector('#timing').textContent=active.moras.map(m=>`${m.text} ${fmt(m.start)}–${fmt(m.end)}`).join('　');
-  }else{fill.style.width='0';moraBox.replaceChildren();moraBox.dataset.line='';document.querySelector('#timing').textContent=''}
+    timing.textContent=active.moras.map(m=>`${m.text} ${fmt(m.start)}–${fmt(m.end)}`).join('　');
+  }else{moraBox.replaceChildren();moraBox.dataset.line='';timing.textContent=''}
   requestAnimationFrame(draw);
 }
 document.querySelector('#record').addEventListener('click',async()=>{

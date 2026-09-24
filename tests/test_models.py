@@ -6,6 +6,7 @@ import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
+import wave
 from unittest.mock import patch
 
 from soramimic_score import ModelConfig, LyricLine, analyze_audio, load
@@ -15,6 +16,12 @@ from tests import test_audio_pipeline as fixtures
 
 
 class ModelTests(unittest.TestCase):
+    @staticmethod
+    def write_audio(path):
+        with wave.open(str(path), "wb") as wav:
+            wav.setnchannels(1); wav.setsampwidth(2); wav.setframerate(16000)
+            wav.writeframes(b"\0\0" * 1600)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
@@ -39,7 +46,7 @@ class ModelTests(unittest.TestCase):
     def test_cli_forwards_adjustment_and_preserves_input_file(self):
         from soramimic_score import AudioAdapters
         audio, lyrics, output = self.root / "input.wav", self.root / "lyrics.txt", self.root / "score.json"
-        audio.touch()
+        self.write_audio(audio)
         lyrics.write_text("耳\n空", encoding="utf-8")
         adapters = AudioAdapters(
             fixtures.AudioPipelineTests._readings, fixtures.AudioPipelineTests._moras,
@@ -103,7 +110,7 @@ class ModelTests(unittest.TestCase):
     def test_cli_runs_configured_audio_pipeline_and_writes_loadable_json(self):
         from soramimic_score import AudioAdapters
         audio = self.root / "input.wav"
-        audio.touch()
+        self.write_audio(audio)
         output = self.root / "score.json"
         adapters = AudioAdapters(
             fixtures.AudioPipelineTests._readings, fixtures.AudioPipelineTests._moras,
