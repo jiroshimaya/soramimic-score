@@ -59,7 +59,8 @@ def _request_ip(request: Request) -> str:
 def _prune(root: Path, db: Path) -> None:
     cutoff = datetime.fromtimestamp(time.time() - RETENTION_SEC, timezone.utc).isoformat()
     with sqlite3.connect(db) as conn:
-        old = conn.execute("SELECT id FROM jobs WHERE finished<? AND state IN ('done','failed')",
+        old = conn.execute("SELECT id FROM jobs WHERE finished<? AND state IN ('done','failed') "
+                           "AND COALESCE(synth_state,'') NOT IN ('queued','running')",
                            (cutoff,)).fetchall()
         conn.executemany("DELETE FROM jobs WHERE id=?", old)
         conn.execute("DELETE FROM quota WHERE day<?", (_now_day(),))
