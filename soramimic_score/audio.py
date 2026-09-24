@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 import math
+import statistics
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -27,7 +28,10 @@ from .local_recovery import (coalesce_repeated_suffix_fragments, deficit_windows
                              is_pathological_repeated_vocalization,
                              repeated_vocalization_period, uncovered_note_windows)
 from .note_runs import NoteRunConfig
-from .semantic import credit_recovery_windows, has_melodic_support, is_credit_hallucination
+from .semantic import (MIN_CTC_MEDIAN_SCORE, contextual_non_lyric_template_families,
+                       credit_recovery_windows, has_melodic_support,
+                       is_credit_hallucination, non_lyric_template_family)
+from .vocal_activity import VocalActivity
 
 
 @dataclass(frozen=True)
@@ -85,6 +89,7 @@ MoraAligner = Callable[
 MelodyTranscriber = Callable[[Path], Sequence[MelodyNote]]
 LyricRecoverer = Callable[[Path, float, float], Sequence[LyricLine]]
 RepetitionEvidence = Callable[[Path, Sequence[tuple[float, float]]], Sequence[str]]
+VocalActivityEvidence = Callable[[Path, Sequence[tuple[float, float]]], Sequence[VocalActivity]]
 
 
 @dataclass(frozen=True)
@@ -105,6 +110,7 @@ class AudioAdapters:
     lyric_reading: Callable[[str], str] | None = None
     lyric_recoverer: LyricRecoverer | None = None
     repetition_evidence: RepetitionEvidence | None = None
+    vocal_activity: VocalActivityEvidence | None = None
 
 
 class AudioPipelineError(RuntimeError):
@@ -383,8 +389,24 @@ def analyze_audio(
     notes = _validate_notes(_run_adapter("melody", adapters.melody_transcriber, path))
     recognized_lines = []
     semantic_evidence = []
+    if lyrics is None:
+        raw_recognized, merges = coalesce_repeated_suffix_fragments(raw_recognized)
+        for left, right in merges:
+            semantic_evidence.append(Evidence(
+                f"audio-repeated-suffix-{left}", "soramimic_score.local_recovery",
+                "lyric-boundary-merge", 0.0,
+                {"source_segment_indices": [left, right]},
+            ))
     supplied_surfaces = {strip_ruby(text).strip() for text in lyrics or ()}
-    for index, line in enumerate(raw_recognized):
+    template_families = contextual_non_lyric_template_families(raw_recognized)
+    activity = None
+    if lyrics is None and adapters.vocal_activity is not None:
+        activity = tuple(_run_adapter("vocal activity", adapters.vocal_activity, path,
+                                      tuple((line.start_sec, line.end_sec)
+                                            for line in raw_recognized)))
+        if len(activity) != len(raw_recognized):
+            raise AudioPipelineError("vocal activity", "one result is required per line")
+    for index, (line, family) in enumerate(zip(raw_recognized, template_families, strict=True)):
         if (lyrics is None and is_pathological_repeated_vocalization(line, notes)):
             semantic_evidence.append(Evidence(
                 f"audio-repetition-runaway-{index}", "soramimic_score.local_recovery",
@@ -392,10 +414,22 @@ def analyze_audio(
                 {"source_segment_index": index, "surface": line.text},
             ))
             continue
-        if not is_credit_hallucination(line.text) or line.text.strip() in supplied_surfaces:
+        if (lyrics is None and family is None and activity is not None
+                and not has_melodic_support(line, notes) and not activity[index].supported):
+            semantic_evidence.append(Evidence(
+                f"audio-vocal-silence-{index}", "soramimic_score.vocal_activity",
+                "lyric-semantic-gate", 0.0,
+                {"source_segment_index": index, "surface": line.text,
+                 "status": "rejected", "vocal_activity_relative_db":
+                 activity[index].relative_db},
+            ))
+            continue
+        if (line.text.strip() in supplied_surfaces or family is None
+                or (family not in {"credits", "stock-media-credit"}
+                    and has_melodic_support(line, notes))):
             recognized_lines.append(line)
             continue
-        windows = credit_recovery_windows(line, notes)
+        windows = credit_recovery_windows(line, notes, template_family=family)
         recovered = []
         if windows and adapters.lyric_recoverer is not None:
             if on_progress:
@@ -411,7 +445,7 @@ def analyze_audio(
                                  if candidate.start_sec is not None
                                  and candidate.end_sec is not None
                                  and start <= candidate.start_sec < candidate.end_sec <= end
-                                 and not is_credit_hallucination(candidate.text)
+                                 and non_lyric_template_family(candidate.text) is None
                                  and not is_pathological_repeated_vocalization(candidate, notes)
                                  and has_melodic_support(candidate, notes))
         recognized_lines.extend(recovered)
@@ -419,20 +453,13 @@ def analyze_audio(
             f"audio-credit-gate-{index}", "soramimic_score.semantic",
             "lyric-semantic-gate", 0.0,
             {"source_segment_index": index, "surface": line.text,
+             "template_family": family,
              "status": "recovered" if recovered else "rejected",
              "recovery_windows": [list(window) for window in windows],
              "recovered_count": len(recovered)},
         ))
     recognized_lines.sort(key=lambda item: (item.start_sec, item.end_sec))
     recognized = _validate_lines(recognized_lines, timed=True)
-    if lyrics is None:
-        recognized, merges = coalesce_repeated_suffix_fragments(recognized)
-        for left, right in merges:
-            semantic_evidence.append(Evidence(
-                f"audio-repeated-suffix-{left}", "soramimic_score.local_recovery",
-                "lyric-boundary-merge", 0.0,
-                {"source_segment_indices": [left, right]},
-            ))
     if lyrics is None and adapters.repetition_evidence is not None:
         candidate_indices = [index for index, line in enumerate(recognized)
                              if repeated_vocalization_period(line.text) is not None
@@ -480,7 +507,7 @@ def analyze_audio(
             return tuple(candidate for candidate in candidates
                          if candidate.start_sec is not None and candidate.end_sec is not None
                          and start <= candidate.start_sec < candidate.end_sec <= end
-                         and not is_credit_hallucination(candidate.text)
+                         and non_lyric_template_family(candidate.text) is None
                          and not is_pathological_repeated_vocalization(candidate, notes)
                          and has_melodic_support(candidate, notes))
 
@@ -567,6 +594,51 @@ def analyze_audio(
     moras = _validate_moras(
         readings, _run_adapter("mora alignment", adapters.mora_aligner, path, lines, readings),
     )
+    if lyrics is None:
+        rejected = []
+        for index, line in enumerate(lines):
+            family = non_lyric_template_family(line.text)
+            if family is None or family in {"credits", "stock-media-credit"}:
+                continue
+            scores = [mora.confidence for mora in moras if mora.line_index == index]
+            median_score = statistics.median(scores) if scores else 0.0
+            if median_score >= MIN_CTC_MEDIAN_SCORE:
+                continue
+            rejected.append(index)
+            semantic_evidence.append(Evidence(
+                f"audio-ctc-template-{index}", "soramimic_score.semantic",
+                "lyric-semantic-gate", 0.0,
+                {"source_segment_index": index, "surface": line.text,
+                 "template_family": family, "ctc_median_score": median_score,
+                 "status": "rejected"},
+            ))
+        if rejected:
+            if on_progress:
+                on_progress("字幕候補の発音を再確認しています")
+            retained = [line for index, line in enumerate(lines) if index not in rejected]
+            for index in rejected:
+                source = lines[index]
+                if adapters.lyric_recoverer is None:
+                    continue
+                for start, end in credit_recovery_windows(source, notes):
+                    try:
+                        candidates = _validate_lines(
+                            adapters.lyric_recoverer(path, start, end), timed=True)
+                    except Exception:
+                        continue
+                    retained.extend(candidate for candidate in candidates
+                                    if candidate.start_sec is not None
+                                    and candidate.end_sec is not None
+                                    and start <= candidate.start_sec < candidate.end_sec <= end
+                                    and non_lyric_template_family(candidate.text) is None
+                                    and not is_pathological_repeated_vocalization(candidate, notes)
+                                    and has_melodic_support(candidate, notes))
+            lines = _validate_lines(sorted(retained, key=lambda item: item.start_sec), timed=True)
+            readings = _validate_readings(
+                lines, _run_adapter("readings", adapters.reading_selector, path, lines))
+            moras = _validate_moras(
+                readings, _run_adapter("mora alignment", adapters.mora_aligner,
+                                       path, lines, readings))
     if on_progress:
         on_progress("楽譜データを組み立てています")
     observations = build_audio_observations(lines, readings, moras, notes)
