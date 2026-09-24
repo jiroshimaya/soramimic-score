@@ -203,6 +203,49 @@ class AudioPipelineTests(unittest.TestCase):
                             and item.detail["status"] == "recovered"
                             for item in score.observations.evidence))
 
+    def test_unpronounceable_credit_retry_does_not_fail_the_song(self):
+        def notes(_path):
+            return (MelodyNote(0, 2, 60), MelodyNote(2.2, 2.6, 62))
+
+        def reading(text):
+            if text == "未知記号":
+                raise ValueError("no reading")
+            return "ミミ"
+
+        score = analyze_audio(self.audio, AudioAdapters(
+            self._readings, self._moras, notes,
+            lambda _: (LyricLine("作詞 初音ミク", 0, 2), LyricLine("耳", 2.2, 2.6)),
+            lyric_reading=reading,
+            lyric_recoverer=lambda _path, start, end:
+                (LyricLine("未知記号", start, start + .4),),
+        ))
+        self.assertEqual(score.score.canonical_text, "耳")
+
+    def test_weak_ctc_rejects_credit_retry_before_final_score(self):
+        def notes(_path):
+            return (MelodyNote(0, 2, 60), MelodyNote(2.2, 2.6, 62))
+
+        passes = []
+
+        def align(_path, lines, readings):
+            passes.append(tuple(line.text for line in lines))
+            return tuple(AlignedMora(index, offset, kana,
+                                     line.start_sec + offset * .05,
+                                     line.start_sec + (offset + 1) * .05,
+                                     .0001 if line.text == "空" else .8)
+                         for index, (line, reading) in enumerate(zip(lines, readings))
+                         for offset, kana in enumerate(reading.kana))
+
+        score = analyze_audio(self.audio, AudioAdapters(
+            self._readings, align, notes,
+            lambda _: (LyricLine("作詞 初音ミク", 0, 2), LyricLine("耳", 2.2, 2.6)),
+            lyric_reading=lambda text: "ソラ" if text == "空" else "ミミ",
+            lyric_recoverer=lambda _path, start, end:
+                (LyricLine("空", start, start + .4),),
+        ))
+        self.assertEqual(score.score.canonical_text, "耳")
+        self.assertEqual(passes, [("空", "耳"), ("耳",)])
+
     def test_supplied_credit_text_remains_authoritative(self):
         credit = "作詞・作曲・編曲 初音ミク"
         def reading(_path, lines):
