@@ -82,7 +82,7 @@ MelodyTranscriber = Callable[[Path], Sequence[MelodyNote]]
 class AudioAdapters:
     """The four model boundaries needed by the audio pipeline.
 
-    ``lyric_recognizer`` may be omitted when lyrics are supplied without adjustment.
+    ``lyric_recognizer`` is required by the ASR-first audio pipeline.
     ``lyric_reading`` optionally supplies linguistic readings for whole-line
     comparison (otherwise normalized surface text is used). The other adapters
     are required in both modes.
@@ -93,6 +93,9 @@ class AudioAdapters:
     melody_transcriber: MelodyTranscriber
     lyric_recognizer: LyricRecognizer | None = None
     lyric_reading: Callable[[str], str] | None = None
+    reading_refiner: Callable[
+        [Path, Sequence[LyricLine], Sequence[ReadingSelection]], Sequence[ReadingSelection]
+    ] | None = None
 
 
 class AudioPipelineError(RuntimeError):
@@ -124,6 +127,7 @@ def _validate_lines(lines: Sequence[LyricLine], *, timed: bool) -> tuple[LyricLi
     if not result:
         raise AudioPipelineError("lyrics", "no lyric lines were produced")
     previous_end = 0.0
+    normalized = []
     for line in result:
         if not isinstance(line.text, str) or not line.text.strip():
             raise AudioPipelineError("lyrics", "lyric lines must contain text")
@@ -132,13 +136,17 @@ def _validate_lines(lines: Sequence[LyricLine], *, timed: bool) -> tuple[LyricLi
         if timed:
             if line.start_sec is None or line.end_sec is None:
                 raise AudioPipelineError("lyrics", "recognized lines need start and end times")
-            if (not math.isfinite(line.start_sec + line.end_sec)
-                    or line.start_sec < previous_end or line.end_sec <= line.start_sec):
+            if (not math.isfinite(line.start_sec + line.end_sec) or line.start_sec < 0
+                    or line.start_sec < previous_end - 1e-6
+                    or line.end_sec <= max(previous_end, line.start_sec)):
                 raise AudioPipelineError(
                     "lyrics", "recognized line times must be finite and non-overlapping",
                 )
+            if line.start_sec < previous_end:
+                line = replace(line, start_sec=previous_end)
             previous_end = line.end_sec
-    return result
+        normalized.append(line)
+    return tuple(normalized)
 
 
 def _validate_readings(
@@ -315,7 +323,9 @@ def analyze_audio(
 ) -> ScoreDocument:
     """Run configured acoustic adapters and compile one canonical score JSON model.
 
-    Supplying ``lyrics`` skips recognition by default. With ``adjust_lyrics=True``,
+    Supplied lyrics are aligned as a display overlay after automatic analysis.
+    Unmatched input remains unresolved; the input text is never silently removed.
+    With ``adjust_lyrics=True``,
     whole input lines may be omitted or repeated and recognized lines added.
     Matched input lines remain verbatim; the original input and decisions are
     retained as evidence. Recognition errors can affect these edits.
@@ -335,17 +345,19 @@ def analyze_audio(
             return analyze_audio(path, prepared, lyrics=lyrics, adjust_lyrics=adjust_lyrics)
 
     adjustment = None
-    if lyrics is None:
+    if lyrics is not None:
+        if isinstance(lyrics, (str, bytes)):
+            raise TypeError("lyrics must be a sequence of lines, not one string")
+        _validate_lines(tuple(LyricLine(text) for text in lyrics), timed=False)
+    if not adjust_lyrics:
         if adapters.lyric_recognizer is None:
             raise AudioPipelineError(
-                "lyrics", "a lyric recognizer is required when lyrics are not supplied",
+                "lyrics", "ASR-first analysis requires a recognizer, also with supplied lyrics",
             )
         lines = _validate_lines(
             _run_adapter("lyrics", adapters.lyric_recognizer, path), timed=True,
         )
     else:
-        if isinstance(lyrics, (str, bytes)):
-            raise TypeError("lyrics must be a sequence of lines, not one string")
         lines = _validate_lines(tuple(LyricLine(text) for text in lyrics), timed=False)
         if adjust_lyrics:
             from .lyrics import adjust_known_lyrics
@@ -379,4 +391,114 @@ def analyze_audio(
          if line.start_sec is not None and line.end_sec is not None}
         or None
     )
-    return compile_score(observations, line_windows_by_utterance=line_windows)
+    result = compile_score(observations, line_windows_by_utterance=line_windows)
+    if lyrics is not None and not adjust_lyrics:
+        from .surface import SurfaceLine, align_lyric_surface, attach_lyric_surface
+        convert = adapters.lyric_reading or (lambda _: "")
+        overlay = align_lyric_surface(
+            [SurfaceLine(line.text, reading.kana, convert(line.text) or None)
+             for line, reading in zip(lines, readings, strict=True)],
+            [SurfaceLine(text, convert(text)) for text in lyrics],
+        )
+        for group in overlay["groups"]:
+            group["utterance_ids"] = [f"u{i}" for i in group["asr_indices"]]
+            group["start_sec"] = lines[group["asr_indices"][0]].start_sec
+            group["end_sec"] = lines[group["asr_indices"][-1]].end_sec
+        if adapters.reading_refiner is not None:
+            result, reviews = _refine_supplied_readings(
+                path, adapters, lines, readings, moras, notes, result, overlay, line_windows,
+            )
+            overlay["reading_reviews"] = reviews
+            overlay["acoustic_changes"] = any(row["status"] == "applied" for row in reviews)
+        return attach_lyric_surface(result, overlay)
+    return result
+
+
+def _refine_supplied_readings(path, adapters, lines, readings, moras, notes,
+                              result, overlay, line_windows):
+    """Recheck only unambiguous one-to-one matches; accept bounded local changes.
+
+    All candidate lengths remain eligible. Rebuilding the graph must preserve the
+    audible plan of every other line exactly; otherwise keep the automatic result.
+    """
+    reviews = []
+    matched = []
+    for group in overlay["groups"]:
+        if group["operation"] != "match":
+            continue
+        if len(group["asr_indices"]) != 1 or len(group["supplied_indices"]) != 1:
+            reviews.append({"asr_indices": group["asr_indices"], "status": "unresolved-group"})
+            continue
+        matched.append(group)
+    if not matched:
+        return result, reviews
+    requested_lines = tuple(replace(lines[g["asr_indices"][0]], text=g["display_text"])
+                            for g in matched)
+    baselines = tuple(readings[g["asr_indices"][0]] for g in matched)
+    selections = _validate_readings(requested_lines, _run_adapter(
+        "reading refinement", adapters.reading_refiner, path, requested_lines, baselines,
+    ))
+    changed = [i for i, (a, b) in enumerate(zip(baselines, selections, strict=True))
+               if a.kana != b.kana]
+    aligned_by_request = {}
+    alignment_error = False
+    if changed:
+        changed_readings = tuple(selections[i] for i in changed)
+        try:
+            local = _validate_moras(changed_readings, _run_adapter(
+                "local mora alignment", adapters.mora_aligner, path,
+                tuple(requested_lines[i] for i in changed), changed_readings,
+            ))
+            aligned_by_request = {request: tuple(m for m in local if m.line_index == offset)
+                                  for offset, request in enumerate(changed)}
+        except AudioPipelineError:
+            # A failed optional recheck must not destroy a complete ASR result.
+            alignment_error = True
+    for request, (group, line, selection) in enumerate(zip(
+        matched, requested_lines, selections, strict=True,
+    )):
+        index = group["asr_indices"][0]
+        before = readings[index]
+        review = {"asr_indices": [index], "before": before.kana,
+                  "proposed": selection.kana, "detail": selection.detail,
+                  "status": "unchanged"}
+        reviews.append(review)
+        if selection.kana == before.kana:
+            continue
+        if alignment_error:
+            review["status"] = "infeasible-local-alignment"
+            continue
+        aligned = aligned_by_request[request]
+        if any(m.start_sec < line.start_sec or m.end_sec > line.end_sec for m in aligned):
+            review["status"] = "outside-recognized-window"
+            continue
+        proposed_readings = tuple(selection if i == index else r for i, r in enumerate(readings))
+        proposed_moras = tuple(sorted(
+            [m for m in moras if m.line_index != index]
+            + [replace(m, line_index=index) for m in aligned],
+            key=lambda m: (m.line_index, m.mora_index),
+        ))
+        try:
+            proposed = compile_score(
+                build_audio_observations(lines, proposed_readings, proposed_moras, notes),
+                line_windows_by_utterance=line_windows,
+            )
+        except (ValueError, AudioPipelineError):
+            review["status"] = "infeasible-local-alignment"
+            continue
+
+        def other_plan(doc):
+            return [(s.utterance_id, s.kana, s.start_sec, s.end_sec, s.midi_pitch)
+                    for s in doc.score.synthesis_plan if s.utterance_id != f"u{index}"]
+
+        if other_plan(proposed) != other_plan(result):
+            review["status"] = "would-change-other-lines"
+            continue
+        if proposed.score.unresolved_unit_ids:
+            review["status"] = "unresolved-synthesis"
+            continue
+        result, readings, moras = proposed, proposed_readings, proposed_moras
+        group["original_acoustic_reading"] = group["acoustic_reading"]
+        group["acoustic_reading"] = selection.kana
+        review["status"] = "applied"
+    return result, reviews

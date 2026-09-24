@@ -3,6 +3,7 @@
 from .alignment import ObservedSingingUnit, build_known_lyrics_document
 from .models import ModelConfig
 from .lyrics import LyricAdjustment, adjust_known_lyrics
+from .surface import SurfaceLine, align_lyric_surface, attach_lyric_surface, lyric_surface
 from .audio import (
     AlignedMora,
     AudioAdapters,
@@ -71,6 +72,10 @@ from .vocalization import (
 )
 
 __all__ = [
+    "SurfaceLine",
+    "align_lyric_surface",
+    "attach_lyric_surface",
+    "lyric_surface",
     "ModelConfig",
     "Boundary",
     "AlignedMora",

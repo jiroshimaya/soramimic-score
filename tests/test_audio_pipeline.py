@@ -11,6 +11,7 @@ from soramimic_score import (
     ReadingSelection,
     analyze_audio,
     build_audio_observations,
+    lyric_surface,
 )
 
 
@@ -88,16 +89,18 @@ class AudioPipelineTests(unittest.TestCase):
             for item in score.observations.evidence
         ))
 
-    def test_known_lyrics_skip_recognition_without_rewriting_text(self):
+    def test_known_lyrics_run_recognition_and_preserve_acoustic_result(self):
         def reject(_path):
-            raise AssertionError("known lyrics must skip recognition")
+            return (LyricLine("空", 0, .4), LyricLine("耳", .4, .8))
 
         score = analyze_audio(
             self.audio,
             AudioAdapters(self._readings, self._moras, self._melody, reject),
-            lyrics=("空", "耳"),
+            lyrics=("空", "耳", "遠い星"),
         )
         self.assertEqual(score.score.canonical_text, "空\n耳")
+        self.assertEqual(lyric_surface(score)["supplied_lines"], ["空", "耳", "遠い星"])
+        self.assertEqual(lyric_surface(score)["unused_supplied_indices"], [2])
 
     def test_observation_builder_marks_uncalibrated_note_confidence(self):
         document = build_audio_observations(
@@ -141,7 +144,8 @@ class AudioPipelineTests(unittest.TestCase):
         with self.assertRaisesRegex(AudioPipelineError, "selected reading"):
             analyze_audio(
                 self.audio,
-                AudioAdapters(self._readings, bad_moras, self._melody),
+                AudioAdapters(self._readings, bad_moras, self._melody,
+                              lambda _: (LyricLine("空", 0, .4),)),
                 lyrics=("空",),
             )
 
