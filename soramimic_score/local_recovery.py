@@ -5,9 +5,12 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import replace
 import re
+import math
 import statistics
 from typing import TYPE_CHECKING
 import unicodedata
+
+from .japanese import kana_to_moras, katakana
 
 if TYPE_CHECKING:
     from .audio import LyricLine, MelodyNote
@@ -54,6 +57,76 @@ def coalesce_repeated_suffix_fragments(lines: Sequence[LyricLine]
             merged.append(lines[index])
             index += 1
     return tuple(merged), tuple(evidence)
+
+
+_VOCALIZATION_KANA = frozenset("アァイィウゥエェオォラナダファハヤワー")
+_LATIN_VOCALIZATION = re.compile(r"wow|la|na|da|fa|ha|ya|a+h*|i+|u+h*|e+|o+h*")
+_LATIN_MORAS = {"wow": ("ワ", "ウ"), "la": ("ラ",), "na": ("ナ",),
+                "da": ("ダ",), "fa": ("ファ",), "ha": ("ハ",), "ya": ("ヤ",)}
+
+
+def repeated_vocalization_period(text: str) -> tuple[str, ...] | None:
+    """Find a short repeating pure vocalization, excluding ordinary lyrics."""
+    normalized = katakana(_normalized(text)).replace("ー", "")
+    if not normalized:
+        return None
+    if re.fullmatch(r"[ァ-ヶ]+", normalized):
+        if any(char not in _VOCALIZATION_KANA for char in normalized):
+            return None
+        moras = list(kana_to_moras(normalized))
+    elif normalized.isascii():
+        moras = []
+        cursor = 0
+        while cursor < len(normalized):
+            match = _LATIN_VOCALIZATION.match(normalized, cursor)
+            if match is None:
+                return None
+            token = match.group()
+            moras.extend(_LATIN_MORAS[token] if token in _LATIN_MORAS else
+                         ({"a": "ア", "i": "イ", "u": "ウ",
+                           "e": "エ", "o": "オ"}[token[0]],))
+            cursor = match.end()
+    else:
+        return None
+    for width in range(1, min(3, len(moras) // 2) + 1):
+        if width > 1 and len(moras) < width * 3:
+            continue
+        if all(mora == moras[index % width] for index, mora in enumerate(moras)):
+            return tuple(moras[:width])
+    return None
+
+
+def expand_repeated_vocalization_from_kana(
+    line: LyricLine, evidence_text: str, notes: Sequence[MelodyNote],
+) -> LyricLine | None:
+    """Use KanaWhisper for count only; spell every mora from Whisper's period."""
+    period = repeated_vocalization_period(line.text)
+    if period is None or line.start_sec is None or line.end_sec is None:
+        return None
+    source = kana_to_moras(katakana(line.text))
+    if not source:
+        source = tuple(period[index % len(period)] for index in range(
+            max(2, len(_normalized(line.text)) // 2)))
+    evidence = kana_to_moras("".join(re.findall(r"[ァ-ヶー]+",
+                              katakana(evidence_text).replace("ヲ", "オ"))).replace("ー", ""))
+    note_count = sum(line.start_sec <= (note.start_sec + note.end_sec) / 2 < line.end_sec
+                     for note in notes)
+    if not evidence or note_count < 2:
+        return None
+    gain = len(source) + max(2, math.ceil(len(source) * .25))
+    if (len(evidence) < gain or len(evidence) < math.ceil(note_count * .25)
+            or len(evidence) > math.ceil(note_count * 1.5)
+            or len(evidence) / max(1e-6, line.end_sec - line.start_sec) > 8):
+        return None
+    similarity = max(
+        sum(mora == period[(index + phase) % len(period)]
+            for index, mora in enumerate(evidence)) / len(evidence)
+        for phase in range(len(period))
+    )
+    if similarity < .65:
+        return None
+    return replace(line, text="".join(period[index % len(period)]
+                                      for index in range(len(evidence))))
 
 
 def deficit_windows(lines: Sequence[LyricLine], notes: Sequence[MelodyNote],
