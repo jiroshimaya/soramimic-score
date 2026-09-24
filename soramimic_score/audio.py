@@ -26,7 +26,7 @@ from .line_windows import snap_line_windows_to_rests
 from .local_recovery import (coalesce_repeated_suffix_fragments, deficit_windows,
                              expand_repeated_vocalization_from_kana,
                              is_pathological_repeated_vocalization,
-                             repeated_vocalization_period, uncovered_note_windows)
+                             repeated_vocalization_period, unowned_note_windows)
 from .note_runs import NoteRunConfig
 from .semantic import (MIN_CTC_MEDIAN_SCORE, contextual_non_lyric_template_families,
                        credit_recovery_windows, has_melodic_support,
@@ -544,32 +544,38 @@ def analyze_audio(
             if (candidates and candidates[0].start_sec <= source.start_sec + .5
                     and candidates[-1].end_sec >= source.end_sec - .5
                     and sum(count_moras(item.text) for item in candidates) >= counts[index] + 2):
+                # More morae alone can be a Whisper hallucination. Compare the
+                # local retry with the original line on the same vocal audio.
+                try:
+                    source_readings = _validate_readings((source,), _run_adapter(
+                        "readings", adapters.reading_selector, path, (source,)))
+                    source_moras = _validate_moras(source_readings, _run_adapter(
+                        "mora alignment", adapters.mora_aligner,
+                        path, (source,), source_readings))
+                    candidate_readings = _validate_readings(candidates, _run_adapter(
+                        "readings", adapters.reading_selector, path, candidates))
+                    candidate_moras = _validate_moras(candidate_readings, _run_adapter(
+                        "mora alignment", adapters.mora_aligner,
+                        path, candidates, candidate_readings))
+                except Exception:
+                    continue
+                source_ctc = statistics.median(item.confidence for item in source_moras)
+                candidate_ctc = statistics.median(item.confidence for item in candidate_moras)
+                if (candidate_ctc < MIN_CTC_MEDIAN_SCORE
+                        or candidate_ctc < source_ctc * .5):
+                    continue
                 replacements[index] = candidates
                 semantic_evidence.append(Evidence(
                     f"audio-deficit-recovery-{index}", "soramimic_score.local_recovery",
-                    "lyric-local-retry", 0.0,
+                    "lyric-local-retry", candidate_ctc,
                     {"source_segment_index": index, "window": [start, end],
                      "original_moras": counts[index], "recovered_moras":
-                     sum(count_moras(item.text) for item in candidates)},
+                     sum(count_moras(item.text) for item in candidates),
+                     "source_ctc": source_ctc, "recovered_ctc": candidate_ctc},
                 ))
         retained = tuple(item for index, line in enumerate(recognized)
                          for item in replacements.get(index, (line,)))
-        additions = []
-        for start, end in uncovered_note_windows(retained, notes):
-            for candidate in retry(start, end):
-                if any(candidate.start_sec < line.end_sec and candidate.end_sec > line.start_sec
-                       for line in (*retained, *additions)):
-                    continue
-                additions.append(candidate)
-                semantic_evidence.append(Evidence(
-                    f"audio-gap-recovery-{len(additions)}", "soramimic_score.local_recovery",
-                    "lyric-local-retry", 0.0,
-                    {"window": [start, end], "recovered_text": candidate.text},
-                ))
-        recognized = _validate_lines(
-            sorted((*retained, *additions), key=lambda item: (item.start_sec, item.end_sec)),
-            timed=True,
-        )
+        recognized = _validate_lines(retained, timed=True)
     adjustment, overlay = None, None
     lines = recognized
     if lyrics is not None:
@@ -663,6 +669,87 @@ def analyze_audio(
             moras = _validate_moras(
                 readings, _run_adapter("mora alignment", adapters.mora_aligner,
                                        path, lines, readings))
+    if lyrics is None and adapters.lyric_recoverer is not None:
+        # Stage 3 owns note assignment. Probe once before retrying truly unowned
+        # note runs; a raw gap between Whisper lines is not sufficient evidence.
+        provisional = compile_score(
+            build_audio_observations(lines, readings, moras, notes),
+            config=NoteRunConfig(whisper_boundary_cost_per_sec2=.1),
+            line_windows_by_utterance={
+                f"u{index}": (line.start_sec, line.end_sec)
+                for index, line in enumerate(lines)
+            } if lines else None,
+        )
+        windows = unowned_note_windows(provisional.observations, lines)
+        if windows and adapters.vocal_activity is not None:
+            if on_progress:
+                on_progress("歌詞に未対応の音符を再確認しています")
+            activity = tuple(_run_adapter(
+                "vocal activity", adapters.vocal_activity, path,
+                tuple((start, end) for start, end, _ in windows)))
+            if len(activity) != len(windows):
+                raise AudioPipelineError("vocal activity", "one result is required per window")
+            additions = []
+            for index, ((start, end, note_count), evidence) in enumerate(
+                    zip(windows, activity, strict=True)):
+                if not evidence.supported:
+                    continue
+                best = None
+                for retry_start, retry_end in ((start, end),
+                                               (max(0., start - .5), end + .5)):
+                    try:
+                        raw = _validate_lines(adapters.lyric_recoverer(
+                            path, retry_start, retry_end), timed=True)
+                    except Exception:
+                        continue
+                    candidates = tuple(replace(candidate,
+                                               start_sec=max(start, candidate.start_sec),
+                                               end_sec=min(end, candidate.end_sec))
+                                       for candidate in raw
+                                       if candidate.start_sec < end and candidate.end_sec > start)
+                    candidates = tuple(candidate for candidate in candidates
+                                       if candidate.end_sec > candidate.start_sec
+                                       and non_lyric_template_family(candidate.text) is None
+                                       and not is_pathological_repeated_vocalization(candidate, notes)
+                                       and readable(candidate.text)
+                                       and has_melodic_support(candidate, notes)
+                                       and not any(candidate.start_sec < line.end_sec
+                                                   and candidate.end_sec > line.start_sec
+                                                   for line in (*lines, *additions)))
+                    if not candidates:
+                        continue
+                    try:
+                        selected = _validate_readings(candidates, _run_adapter(
+                            "readings", adapters.reading_selector, path, candidates))
+                        aligned = _validate_moras(selected, _run_adapter(
+                            "mora alignment", adapters.mora_aligner,
+                            path, candidates, selected))
+                    except Exception:
+                        continue
+                    mora_count = sum(len(kana_to_moras(item.kana)) for item in selected)
+                    ctc = statistics.median(item.confidence for item in aligned) if aligned else 0.
+                    if (mora_count < max(4, math.ceil(note_count * .25))
+                            or mora_count > note_count * 2
+                            or ctc < MIN_CTC_MEDIAN_SCORE):
+                        continue
+                    if best is None or ctc > best[0]:
+                        best = (ctc, candidates)
+                if best is None:
+                    continue
+                additions.extend(best[1])
+                semantic_evidence.append(Evidence(
+                    f"audio-gap-recovery-{index}", "soramimic_score.local_recovery",
+                    "lyric-local-retry", best[0],
+                    {"window": [start, end], "note_count": note_count,
+                     "recovered_count": len(best[1])},
+                ))
+            if additions:
+                lines = _validate_lines(sorted((*lines, *additions),
+                                               key=lambda item: item.start_sec), timed=True)
+                readings = _validate_readings(lines, _run_adapter(
+                    "readings", adapters.reading_selector, path, lines))
+                moras = _validate_moras(readings, _run_adapter(
+                    "mora alignment", adapters.mora_aligner, path, lines, readings))
     if on_progress:
         on_progress("楽譜データを組み立てています")
     observations = build_audio_observations(lines, readings, moras, notes)
