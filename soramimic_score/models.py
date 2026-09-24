@@ -284,5 +284,10 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None) -> 
     def lyric_reading(text):
         return dictionary_readings(None, (LyricLine(text),))[0].kana
 
+    def repeat_evidence(path, windows):
+        source = vocals_path or path
+        return transcribe_kana_views({"vocals": source}, windows, config)["vocals"]
+
     return AudioAdapters(select_readings if config.acoustic_readings else dictionary_readings,
-                         align, melody, recognize, lyric_reading, recover_window)
+                         align, melody, recognize, lyric_reading, recover_window,
+                         repeat_evidence)

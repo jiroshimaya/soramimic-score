@@ -5,10 +5,52 @@ from pathlib import Path
 from soramimic_score.audio import (AlignedMora, AudioAdapters, LyricLine,
                                    MelodyNote, ReadingSelection, analyze_audio)
 from soramimic_score.local_recovery import (coalesce_repeated_suffix_fragments,
-                                            deficit_windows, uncovered_note_windows)
+                                            deficit_windows,
+                                            expand_repeated_vocalization_from_kana,
+                                            repeated_vocalization_period,
+                                            uncovered_note_windows)
 
 
 class LocalRecoveryTests(unittest.TestCase):
+    def test_kana_evidence_expands_only_whisper_repetition_family_and_count(self):
+        line = LyricLine("ララ", 0, 2)
+        notes = tuple(MelodyNote(i * .25, (i + 1) * .25, 60) for i in range(8))
+        self.assertEqual(repeated_vocalization_period("ララ"), ("ラ",))
+        self.assertEqual(repeated_vocalization_period("la la"), ("ラ",))
+        self.assertIsNone(repeated_vocalization_period("カキカキ"))
+        expanded = expand_repeated_vocalization_from_kana(line, "ララララララ", notes)
+        self.assertEqual(expanded.text, "ララララララ")
+        self.assertIsNone(expand_repeated_vocalization_from_kana(line, "ナナナナナナ", notes))
+        self.assertIsNone(expand_repeated_vocalization_from_kana(line, "ラ" * 20, notes))
+
+    def test_kana_repetition_evidence_reaches_the_score_without_using_its_words(self):
+        line = LyricLine("ララ", 0, 2)
+        notes = tuple(MelodyNote(i * .25, (i + 1) * .25, 60) for i in range(8))
+        calls = []
+
+        def readings(_path, chosen):
+            return tuple(ReadingSelection(item.text, "test", 1) for item in chosen)
+
+        def align(_path, chosen, selected):
+            return tuple(AlignedMora(0, index, char, index * .3, (index + 1) * .3, .9)
+                         for index, char in enumerate(selected[0].kana))
+
+        def evidence(_path, windows):
+            calls.extend(windows)
+            return ("ララララララ",)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "input.wav"
+            path.write_bytes(b"model adapter fixture")
+            document = analyze_audio(path, AudioAdapters(
+                readings, align, lambda _: notes, lambda _: (line,),
+                repetition_evidence=evidence,
+            ))
+        self.assertEqual(calls, [(0, 2)])
+        self.assertEqual(document.score.canonical_text, "ララララララ")
+        self.assertTrue(any(e.kind == "lyric-repetition-expansion"
+                            for e in document.observations.evidence))
+
     def test_short_suffix_joins_only_with_parallel_refrain_evidence(self):
         lines = (LyricLine("君に届け", 0, 2), LyricLine("君に", 3, 4),
                  LyricLine("届け", 4.02, 4.5))

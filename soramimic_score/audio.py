@@ -23,7 +23,8 @@ from .ir import Boundary, Evidence, IntermediateRepresentation, NoteCandidate
 from .japanese import LyricSpan, ReadingCandidate, kana_to_moras
 from .line_windows import snap_line_windows_to_rests
 from .local_recovery import (coalesce_repeated_suffix_fragments, deficit_windows,
-                             uncovered_note_windows)
+                             expand_repeated_vocalization_from_kana,
+                             repeated_vocalization_period, uncovered_note_windows)
 from .note_runs import NoteRunConfig
 from .semantic import credit_recovery_windows, has_melodic_support, is_credit_hallucination
 
@@ -82,6 +83,7 @@ MoraAligner = Callable[
 ]
 MelodyTranscriber = Callable[[Path], Sequence[MelodyNote]]
 LyricRecoverer = Callable[[Path, float, float], Sequence[LyricLine]]
+RepetitionEvidence = Callable[[Path, Sequence[tuple[float, float]]], Sequence[str]]
 
 
 @dataclass(frozen=True)
@@ -101,6 +103,7 @@ class AudioAdapters:
     lyric_recognizer: LyricRecognizer | None = None
     lyric_reading: Callable[[str], str] | None = None
     lyric_recoverer: LyricRecoverer | None = None
+    repetition_evidence: RepetitionEvidence | None = None
 
 
 class AudioPipelineError(RuntimeError):
@@ -421,6 +424,36 @@ def analyze_audio(
                 "lyric-boundary-merge", 0.0,
                 {"source_segment_indices": [left, right]},
             ))
+    if lyrics is None and adapters.repetition_evidence is not None:
+        candidate_indices = [index for index, line in enumerate(recognized)
+                             if repeated_vocalization_period(line.text) is not None
+                             and line.start_sec is not None and line.end_sec is not None
+                             and line.end_sec - line.start_sec <= 24][:4]
+        if candidate_indices:
+            if on_progress:
+                on_progress("繰り返し歌詞を確認しています")
+            windows = tuple((recognized[index].start_sec, recognized[index].end_sec)
+                            for index in candidate_indices)
+            try:
+                evidence_texts = adapters.repetition_evidence(path, windows)
+            except Exception:
+                evidence_texts = ()
+            if len(evidence_texts) == len(candidate_indices):
+                updated = list(recognized)
+                for index, evidence_text in zip(candidate_indices, evidence_texts, strict=True):
+                    expanded = expand_repeated_vocalization_from_kana(
+                        recognized[index], evidence_text, notes)
+                    if expanded is None:
+                        continue
+                    updated[index] = expanded
+                    semantic_evidence.append(Evidence(
+                        f"audio-kana-repeat-{index}", "soramimic_score.local_recovery",
+                        "lyric-repetition-expansion", 0.0,
+                        {"source_segment_index": index, "source_text": recognized[index].text,
+                         "source_moras": len(kana_to_moras(recognized[index].text)),
+                         "expanded_moras": len(kana_to_moras(expanded.text))},
+                    ))
+                recognized = tuple(updated)
     if lyrics is None and adapters.lyric_recoverer is not None:
         def count_moras(text: str) -> int:
             try:
