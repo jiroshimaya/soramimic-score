@@ -91,7 +91,7 @@ class LocalRecoveryTests(unittest.TestCase):
         self.assertFalse(evidence)
 
     def test_note_rich_short_line_gets_bounded_retry_window(self):
-        lines = (LyricLine("ララ", 0, 1.6), LyricLine("カキクケ", 2, 2.8),
+        lines = (LyricLine("カキ", 0, 1.6), LyricLine("カキクケ", 2, 2.8),
                  LyricLine("サシスセ", 3, 3.8))
         notes = tuple(MelodyNote(i * .2, (i + 1) * .2, 60) for i in range(8))
         notes += tuple(MelodyNote(2 + i * .2, 2 + (i + 1) * .2, 62)
@@ -100,14 +100,22 @@ class LocalRecoveryTests(unittest.TestCase):
                        for i in range(4))
         self.assertEqual(deficit_windows(lines, notes, (2, 4, 4)), ((0, 0, 1.6),))
 
+    def test_deficit_retry_splits_at_long_internal_rest(self):
+        lines = (LyricLine("カキ", 0, 5), LyricLine("サシスセ", 6, 6.8),
+                 LyricLine("タチツテ", 7, 7.8))
+        notes = tuple(MelodyNote(start + i * .2, start + (i + 1) * .2, 60)
+                      for start in (1, 3, 6, 7) for i in range(4))
+        self.assertEqual(deficit_windows(lines, notes, (2, 4, 4)),
+                         ((0, .5, 2.3), (0, 2.5, 4.3)))
+
     def test_long_uncovered_note_run_is_retried(self):
         lines = (LyricLine("ア", 0, .4), LyricLine("イ", 3, 3.4))
         notes = tuple(MelodyNote(1 + i * .2, 1 + (i + 1) * .2, 60)
                       for i in range(8))
         self.assertEqual(uncovered_note_windows(lines, notes), ((.7, 2.9),))
 
-    def test_local_retry_recovers_repeated_syllables_without_changing_peers(self):
-        lines = (LyricLine("ララ", 0, 1.6), LyricLine("カキクケ", 2, 2.8),
+    def test_local_retry_recovers_missing_syllables_without_changing_peers(self):
+        lines = (LyricLine("カキ", 0, 1.6), LyricLine("カキクケ", 2, 2.8),
                  LyricLine("サシスセ", 3, 3.8))
         notes = tuple(MelodyNote(i * .2, (i + 1) * .2, 60) for i in range(8))
         notes += tuple(MelodyNote(2 + i * .2, 2 + (i + 1) * .2, 62)
@@ -118,7 +126,7 @@ class LocalRecoveryTests(unittest.TestCase):
 
         def retry(_path, start, end):
             retries.append((start, end))
-            return (LyricLine("ララララ", 0, 1.6),)
+            return (LyricLine("カキクケ", 0, 1.6),)
 
         def readings(_path, chosen):
             return tuple(ReadingSelection(line.text, "test", 1) for line in chosen)
@@ -139,5 +147,5 @@ class LocalRecoveryTests(unittest.TestCase):
                 lyric_reading=lambda text: text, lyric_recoverer=retry,
             ))
         self.assertEqual(retries, [(0, 1.6)])
-        self.assertEqual(document.score.canonical_text, "ララララ\nカキクケ\nサシスセ")
+        self.assertEqual(document.score.canonical_text, "カキクケ\nカキクケ\nサシスセ")
         self.assertTrue(any(e.kind == "lyric-local-retry" for e in document.observations.evidence))
