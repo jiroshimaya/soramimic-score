@@ -199,8 +199,8 @@ class ModelTests(unittest.TestCase):
                 logits[0, 30, 1] = 10
                 logits[0, 40, 2] = 10
                 return SimpleNamespace(logits=logits)
-        with patch("transformers.AutoProcessor.from_pretrained", return_value=Processor()), \
-             patch("transformers.Wav2Vec2ForCTC.from_pretrained", return_value=Model()):
+        with patch("transformers.AutoProcessor.from_pretrained", return_value=Processor()) as processor_factory, \
+             patch("transformers.Wav2Vec2ForCTC.from_pretrained", return_value=Model()) as model_factory:
             align = create_adapters(self.config).mora_aligner
             readings = (ReadingSelection("アア", "test", 1),)
             moras = align(path, (LyricLine("ああ", 0, 1),), readings)
@@ -210,6 +210,8 @@ class ModelTests(unittest.TestCase):
             self.assertGreater(moras[1].confidence, .99)
             known = align(path, (LyricLine("ああ"),), readings)
             self.assertEqual(moras, known)
+            self.assertEqual(processor_factory.call_count, 1)
+            self.assertEqual(model_factory.call_count, 1)
 
             # Supplied text gets a coarse CTC window, then the selected reading
             # is aligned afresh. No lyric recognizer is involved.
@@ -222,6 +224,7 @@ class ModelTests(unittest.TestCase):
                 final = adapters.mora_aligner(path, (LyricLine("ああ"),), selected)
                 self.assertEqual(len(final), 1)
                 self.assertEqual(kana.call_args.args[1], [(0.0, 1.0)])
+                self.assertEqual(model_factory.call_count, 2)
 
             # Forced alignment uses the separated stem on the original clock.
             import librosa
