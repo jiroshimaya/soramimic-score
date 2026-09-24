@@ -114,9 +114,10 @@ document.querySelector('#record').addEventListener('click',async()=>{
     audioDestination=audioContext.createMediaStreamDestination();source.connect(audioDestination);source.connect(audioContext.destination)}
   await audioContext.resume();
   for(const track of audioDestination.stream.getAudioTracks())stream.addTrack(track);
-  const chunks=[];recording=new MediaRecorder(stream);
+  const mime=['video/webm;codecs=vp9,opus','video/webm;codecs=vp8,opus','video/mp4'].find(type=>MediaRecorder.isTypeSupported(type));
+  const chunks=[];recording=new MediaRecorder(stream,mime?{mimeType:mime}:undefined);
   recording.ondataavailable=e=>chunks.push(e.data);
-  recording.onstop=()=>{const url=URL.createObjectURL(new Blob(chunks,{type:recording.mimeType}));const a=document.createElement('a');a.href=url;a.download='score-preview.webm';a.click();setTimeout(()=>URL.revokeObjectURL(url),60000);button.textContent='プレビュー動画を保存';recording=null};
+  recording.onstop=()=>{const type=recording.mimeType;const url=URL.createObjectURL(new Blob(chunks,{type}));const a=document.createElement('a');a.href=url;a.download=type.startsWith('video/mp4')?'score-preview.mp4':'score-preview.webm';a.click();setTimeout(()=>URL.revokeObjectURL(url),60000);button.textContent='プレビュー動画を保存';recording=null};
   player.currentTime=0;await player.play();recording.start();button.textContent='録画を終了';player.addEventListener('ended',()=>recording?.stop(),{once:true});
 });
 </script>
