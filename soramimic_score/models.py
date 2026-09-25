@@ -29,6 +29,8 @@ class ModelConfig:
     acoustic_readings: bool = True
     demucs_checkpoint: Path | None = None
     kana_model: str = KANA_MODEL
+    shared_inference_url: str | None = None
+    shared_inference_priority: str = "dev"
 
     def validate(self):
         if self.device not in {"cpu", "cuda"}:
@@ -66,24 +68,54 @@ def read_melody_lab(path: Path) -> tuple[MelodyNote, ...]:
 def prepared_adapters(path: Path, config: ModelConfig, *, accompaniment_path: Path | None = None):
     """Keep a private temporary vocal stem alive for exactly one analysis."""
     config.validate()
+    shared = None
+    if config.shared_inference_url:
+        from .shared_inference import SharedInference
+        shared = SharedInference(config.shared_inference_url, config.shared_inference_priority)
     with tempfile.TemporaryDirectory(prefix="soramimic-score-vocals-") as directory:
         vocals = None
         if config.separate_vocals:
             vocals = Path(directory) / "vocals.wav"
-            if accompaniment_path is None:
+            if shared is not None:
+                accompaniment = accompaniment_path or Path(directory) / "no_vocals.wav"
+                result = shared.run("demucs", path, {"model": "htdemucs", "device": "auto"},
+                                    {"vocals.wav": vocals,
+                                     "no_vocals.wav": accompaniment})
+                if not isinstance(result, dict) or set(result.get("artifacts", ())) != {
+                        "vocals.wav", "no_vocals.wav"}:
+                    raise RuntimeError("shared Demucs response is invalid")
+            elif accompaniment_path is None:
                 _run_adapter("vocal separation", separate_vocals, path, vocals, config)
             else:
                 _run_adapter("vocal separation", separate_vocals, path, vocals, config,
                              accompaniment_path)
-        yield create_adapters(config, vocals_path=vocals)
+        yield create_adapters(config, vocals_path=vocals, shared=shared)
 
 
-def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None) -> AudioAdapters:
+def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
+                    shared=None) -> AudioAdapters:
     """Low-level model adapters; use prepared_adapters to manage separation."""
     config.validate()
 
     def recognize(path):
         logger.info("歌詞を認識しています")
+        if shared is not None:
+            result = shared.run("whisper", path, {
+                "model_size": config.whisper_model, "device": "auto", "language": "ja",
+                "vad_filter": False, "condition_on_previous_text": False,
+            })
+            if not isinstance(result, dict) or not isinstance(result.get("lines"), list):
+                raise RuntimeError("shared Whisper response is invalid")
+            if result.get("requested_language") != "ja":
+                raise RuntimeError("shared Whisper language response is invalid")
+            previous_end = 0.
+            lines = []
+            for item in result["lines"]:
+                start, end = max(previous_end, float(item["start_sec"]), 0.), float(item["end_sec"])
+                if str(item["text"]).strip() and end > start:
+                    lines.append(LyricLine(str(item["text"]).strip(), start, end))
+                    previous_end = end
+            return tuple(lines)
         from faster_whisper import WhisperModel
         model = WhisperModel(config.whisper_model, device=config.device,
                              compute_type="int8" if config.device == "cpu" else "float16",
@@ -107,6 +139,32 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None) -> 
     def recover_window(path, start, end):
         """Retry a melody-supported credit span without the surrounding song."""
         import librosa
+        if shared is not None:
+            import soundfile as sf
+            samples, _ = librosa.load(str(vocals_path or path), sr=16000, mono=True,
+                                      offset=start, duration=end - start)
+            if len(samples) == 0:
+                return ()
+            with tempfile.TemporaryDirectory(prefix="soramimic-score-retry-") as directory:
+                excerpt = Path(directory) / "window.wav"
+                sf.write(excerpt, samples, 16000)
+                result = shared.run("whisper", excerpt, {
+                    "model_size": config.whisper_model, "device": "auto",
+                    "language": "ja", "vad_filter": False,
+                    "condition_on_previous_text": False, "temperature": 0.,
+                })
+            if not isinstance(result, dict) or not isinstance(result.get("lines"), list):
+                raise RuntimeError("shared Whisper retry response is invalid")
+            if (result.get("requested_language") != "ja"
+                    or result.get("requested_temperature") != 0.):
+                raise RuntimeError("shared Whisper retry settings are unsupported")
+            return tuple(LyricLine(str(item["text"]).strip(),
+                                   max(start, start + float(item["start_sec"])),
+                                   min(end, start + float(item["end_sec"])))
+                         for item in result["lines"]
+                         if str(item["text"]).strip()
+                         and min(end, start + float(item["end_sec"]))
+                         > max(start, start + float(item["start_sec"])))
         from faster_whisper import WhisperModel
 
         samples, _ = librosa.load(str(vocals_path or path), sr=16000, mono=True,
@@ -234,6 +292,13 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None) -> 
 
     def melody(path):
         logger.info("音高を推定しています")
+        if shared is not None:
+            result = shared.run("sheetsage", path, {"device": "auto"})
+            if not isinstance(result, dict) or not isinstance(result.get("notes"), list):
+                raise RuntimeError("shared SheetSage response is invalid")
+            return tuple(MelodyNote(float(item["start_sec"]), float(item["end_sec"]),
+                                    int(item["midi_note"]), "sheetsage2-vocal")
+                         for item in result["notes"])
         import librosa
         import numpy as np
         import torch
@@ -282,7 +347,7 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None) -> 
         paths = {"mix": path}
         if vocals_path is not None:
             paths["vocals"] = vocals_path
-        transcripts = transcribe_kana_views(paths, windows, config)
+        transcripts = kana_views(paths, windows)
         result = list(defaults)
         for index in ambiguous:
             views = {view: "".join(rows[i] for i in assignments[index])
@@ -301,7 +366,23 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None) -> 
 
     def repeat_evidence(path, windows):
         source = vocals_path or path
-        return transcribe_kana_views({"vocals": source}, windows, config)["vocals"]
+        return kana_views({"vocals": source}, windows)["vocals"]
+
+    def kana_views(paths, windows):
+        if shared is None:
+            return transcribe_kana_views(paths, windows, config)
+        results = {}
+        for view, source in paths.items():
+            response = shared.run("kana-whisper", source, {
+                "device": "auto", "windows": [[start, end] for start, end in windows],
+            })
+            if (not isinstance(response, dict)
+                    or not isinstance(response.get("texts"), list)
+                    or len(response["texts"]) != len(windows)
+                    or not all(isinstance(text, str) for text in response["texts"])):
+                raise RuntimeError("shared KanaWhisper response is invalid")
+            results[view] = tuple(response["texts"])
+        return results
 
     def vocal_activity(path, windows):
         from .vocal_activity import measure_vocal_activity

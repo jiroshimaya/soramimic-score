@@ -2085,6 +2085,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "jasyllablesep" },
+    { name = "requests" },
 ]
 
 [package.optional-dependencies]
@@ -2125,6 +2126,7 @@ requires-dist = [
     { name = "numpy", marker = "extra == 'audio'", specifier = ">=1.24,<2.3" },
     { name = "pretty-midi", marker = "extra == 'audio'", specifier = ">=0.2.10" },
     { name = "python-multipart", marker = "extra == 'web'", specifier = ">=0.0.9,<1" },
+    { name = "requests", specifier = ">=2.31,<3" },
     { name = "soramimic-yomi", marker = "extra == 'audio'", git = "https://github.com/soramimic/soramimic-yomi?rev=db8a5406732be25ca827dc5faa4d02f43c9927b2" },
     { name = "soundfile", marker = "extra == 'audio'", specifier = ">=0.12" },
     { name = "torch", marker = "extra == 'audio'", specifier = ">=2.2,<2.9" },
