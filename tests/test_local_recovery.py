@@ -237,6 +237,68 @@ class LocalRecoveryTests(unittest.TestCase):
             self.assertEqual(run(True).score.canonical_text, "カキクケサシスセ\nア")
             self.assertEqual(calls, [(0, 6), (0, 6.5)])
 
+    def test_unowned_repeat_uses_kana_count_only_after_ctc_check(self):
+        notes = tuple(MelodyNote(i * .25, (i + 1) * .25, 60) for i in range(24))
+        notes += (MelodyNote(6, 6.5, 62),)
+
+        def readings(_path, chosen):
+            return tuple(ReadingSelection(line.text, "test", 1) for line in chosen)
+
+        def align(_path, chosen, selected):
+            return tuple(AlignedMora(index, offset, char,
+                                     line.start_sec + offset * .1,
+                                     line.start_sec + (offset + 1) * .1,
+                                     .0001 if line.text == "ララ" else .9)
+                         for index, (line, reading) in enumerate(zip(chosen, selected))
+                         for offset, char in enumerate(reading.kana))
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "input.wav"
+            path.write_bytes(b"model adapter fixture")
+            score = analyze_audio(path, AudioAdapters(
+                readings, align, lambda _: notes,
+                lambda _: (LyricLine("ア", 6, 6.5),),
+                lyric_recoverer=lambda _path, _start, _end: (LyricLine("ララ", 0, 6),),
+                repetition_evidence=lambda _path, _windows: ("ラ" * 8,),
+                vocal_activity=lambda _path, windows: tuple(
+                    VocalActivity(-20, 0, 1, True) for _ in windows),
+            ))
+        self.assertEqual(score.score.canonical_text, "ラ" * 8 + "\nア")
+        recovery = [item for item in score.observations.evidence
+                    if item.kind == "lyric-local-retry"]
+        self.assertEqual(recovery[0].detail["source"], "kana-repeat-vocals")
+
+    def test_unowned_vowels_need_two_agreeing_retries_and_strong_ctc(self):
+        notes = tuple(MelodyNote(i * .25, (i + 1) * .25, 60) for i in range(24))
+        notes += (MelodyNote(6, 6.5, 62),)
+
+        def readings(_path, chosen):
+            return tuple(ReadingSelection(line.text, "test", 1) for line in chosen)
+
+        def align(_path, chosen, selected):
+            return tuple(AlignedMora(index, offset, char,
+                                     line.start_sec + offset * .1,
+                                     line.start_sec + (offset + 1) * .1,
+                                     .0001 if line.text == "カキクケサシスセ" else .9)
+                         for index, (line, reading) in enumerate(zip(chosen, selected))
+                         for offset, char in enumerate(reading.kana))
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "input.wav"
+            path.write_bytes(b"model adapter fixture")
+            score = analyze_audio(path, AudioAdapters(
+                readings, align, lambda _: notes,
+                lambda _: (LyricLine("ア", 6, 6.5),),
+                lyric_recoverer=lambda _path, _start, _end:
+                    (LyricLine("カキクケサシスセ", 0, 6),),
+                vocal_activity=lambda _path, windows: tuple(
+                    VocalActivity(-20, 0, 1, True) for _ in windows),
+            ))
+        self.assertEqual(score.score.canonical_text, "アイウエアイウエ\nア")
+        recovery = [item for item in score.observations.evidence
+                    if item.kind == "lyric-local-retry"]
+        self.assertEqual(recovery[0].detail["source"], "vowel-continuation")
+
     def test_deficit_retry_rejects_weak_acoustic_candidate(self):
         lines = (LyricLine("カキ", 0, 1.6), LyricLine("カキクケ", 2, 2.8),
                  LyricLine("サシスセ", 3, 3.8))
