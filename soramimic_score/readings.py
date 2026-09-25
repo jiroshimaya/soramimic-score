@@ -32,7 +32,7 @@ def _vowels(reading):
             vowel = mora_vowel(mora)
         except ValueError:
             continue
-        if vowel in "aiueo":
+        if vowel is not None and vowel in "aiueo":
             result.append(vowel)
     return tuple(result)
 
