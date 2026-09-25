@@ -24,7 +24,9 @@ from .document import ScoreDocument, compile_score
 from .ir import Boundary, Evidence, IntermediateRepresentation, NoteCandidate
 from .japanese import LyricSpan, ReadingCandidate, kana_to_moras, mora_vowel
 from .line_windows import snap_line_windows_to_rests
-from .local_recovery import (coalesce_repeated_suffix_fragments, deficit_windows,
+from .local_recovery import (adjacent_repeat_groups,
+                             coalesce_repeated_suffix_fragments, deficit_windows,
+                             duration_repeated_vocalization_candidate,
                              expand_repeated_vocalization_from_kana,
                              has_tandem_repeat_note_support,
                              is_pathological_repeated_vocalization,
@@ -488,9 +490,78 @@ def analyze_audio(
         ))
     recognized_lines.sort(key=lambda item: (item.start_sec, item.end_sec))
     recognized = _validate_lines(recognized_lines, timed=True)
-    if lyrics is None and adapters.repetition_evidence is not None:
+    if lyrics is None and (adapters.repetition_evidence is not None
+                           or adapters.repetition_evidence_mix is not None):
+        def repeat_ctc(line: LyricLine) -> float:
+            try:
+                selected = _validate_readings((line,), _run_adapter(
+                    "readings", adapters.reading_selector, path, (line,)))
+                aligned = _validate_moras(selected, _run_adapter(
+                    "mora alignment", adapters.mora_aligner, path, (line,), selected))
+            except Exception:
+                return 0.
+            return statistics.median(item.confidence for item in aligned) if aligned else 0.
+
+        providers = (("mix", adapters.repetition_evidence_mix),
+                     ("vocals", adapters.repetition_evidence))
+        grouped_recovered = set()
+        group_replacements = {}
+        for first, last, period in adjacent_repeat_groups(recognized):
+            source_count = sum(len(kana_to_moras(item.text))
+                               for item in recognized[first:last])
+            grouped = LyricLine("".join(period[index % len(period)]
+                                         for index in range(source_count)),
+                                recognized[first].start_sec, recognized[last - 1].end_sec)
+            local_notes = [note for note in notes
+                           if grouped.start_sec <= (note.start_sec + note.end_sec) / 2
+                           < grouped.end_sec]
+            if local_notes:
+                grouped = replace(grouped,
+                                  start_sec=max(grouped.start_sec, local_notes[0].start_sec),
+                                  end_sec=min(grouped.end_sec, local_notes[-1].end_sec))
+            if grouped.end_sec - grouped.start_sec > 24:
+                continue
+            best = None
+            for view, adapter in providers:
+                if adapter is None:
+                    continue
+                try:
+                    evidence_texts = adapter(path, ((grouped.start_sec, grouped.end_sec),))
+                except Exception:
+                    continue
+                if len(evidence_texts) != 1:
+                    continue
+                expanded = expand_repeated_vocalization_from_kana(
+                    grouped, evidence_texts[0], notes)
+                if expanded is None:
+                    continue
+                ctc = repeat_ctc(expanded)
+                if ctc >= MIN_CTC_MEDIAN_SCORE and (best is None or ctc > best[0]):
+                    best = (ctc, expanded, view)
+            if best is not None:
+                group_replacements[first] = (last, best)
+        if group_replacements:
+            updated = []
+            index = 0
+            while index < len(recognized):
+                if index in group_replacements:
+                    last, (ctc, expanded, view) = group_replacements[index]
+                    updated.append(expanded)
+                    grouped_recovered.add(expanded)
+                    semantic_evidence.append(Evidence(
+                        f"audio-adjacent-repeat-{index}", "soramimic_score.local_recovery",
+                        "lyric-repetition-expansion", ctc,
+                        {"source_segment_indices": list(range(index, last)),
+                         "source": view, "expanded_moras": len(kana_to_moras(expanded.text))},
+                    ))
+                    index = last
+                else:
+                    updated.append(recognized[index])
+                    index += 1
+            recognized = _validate_lines(updated, timed=True)
         candidate_indices = [index for index, line in enumerate(recognized)
-                             if repeated_vocalization_period(line.text) is not None
+                             if line not in grouped_recovered
+                             and repeated_vocalization_period(line.text) is not None
                              and line.start_sec is not None and line.end_sec is not None
                              and line.end_sec - line.start_sec <= 24][:4]
         if candidate_indices:
@@ -498,22 +569,33 @@ def analyze_audio(
                 on_progress("繰り返し歌詞を確認しています")
             windows = tuple((recognized[index].start_sec, recognized[index].end_sec)
                             for index in candidate_indices)
-            try:
-                evidence_texts = adapters.repetition_evidence(path, windows)
-            except Exception:
-                evidence_texts = ()
-            if len(evidence_texts) == len(candidate_indices):
-                updated = list(recognized)
+            chosen = {}
+            for view, adapter in providers:
+                if adapter is None:
+                    continue
+                try:
+                    evidence_texts = adapter(path, windows)
+                except Exception:
+                    continue
+                if len(evidence_texts) != len(candidate_indices):
+                    continue
                 for index, evidence_text in zip(candidate_indices, evidence_texts, strict=True):
                     expanded = expand_repeated_vocalization_from_kana(
                         recognized[index], evidence_text, notes)
                     if expanded is None:
                         continue
+                    ctc = repeat_ctc(expanded)
+                    if ctc >= MIN_CTC_MEDIAN_SCORE and (index not in chosen
+                                                        or ctc > chosen[index][0]):
+                        chosen[index] = (ctc, expanded, view)
+            if chosen:
+                updated = list(recognized)
+                for index, (ctc, expanded, view) in chosen.items():
                     updated[index] = expanded
                     semantic_evidence.append(Evidence(
                         f"audio-kana-repeat-{index}", "soramimic_score.local_recovery",
-                        "lyric-repetition-expansion", 0.0,
-                        {"source_segment_index": index, "source_text": recognized[index].text,
+                        "lyric-repetition-expansion", ctc,
+                        {"source_segment_index": index, "source": view,
                          "source_moras": len(kana_to_moras(recognized[index].text)),
                          "expanded_moras": len(kana_to_moras(expanded.text))},
                     ))
@@ -554,16 +636,34 @@ def analyze_audio(
             if effective >= 4 and found >= 2:
                 ratios.append(found / effective)
         median_ratio = statistics.median(ratios) if ratios else 1.
+        windows_by_line = {}
         for index, start, end in deficit_windows(recognized, notes, counts):
-            if index in replacements:
+            windows_by_line.setdefault(index, []).append((start, end))
+        for index, windows in windows_by_line.items():
+            recovered = sorted((item for start, end in windows
+                                for item in retry(start, end)),
+                               key=lambda item: (item.start_sec, item.end_sec))
+            try:
+                candidates = _validate_lines(recovered, timed=True)
+            except AudioPipelineError:
                 continue
-            candidates = retry(start, end)
             source = recognized[index]
+            period = repeated_vocalization_period(source.text)
+            if period is not None and len(period) > 1:
+                peers = [other.end_sec - other.start_sec
+                         for peer_index, other in enumerate(recognized)
+                         if peer_index != index and other.text == source.text]
+                if peers:
+                    repetition_count = math.floor(
+                        (source.end_sec - source.start_sec)
+                        / statistics.median(peers) + .5)
+                    repeated = duration_repeated_vocalization_candidate(
+                        source, candidates, repetition_count)
+                    if repeated is not None:
+                        candidates = (repeated,)
             effective_source = counts[index] + len(re.findall(r"[A-Za-z]+", source.text))
             required_moras = effective_source + max(2, math.ceil(effective_source * .25))
-            if (candidates and candidates[0].start_sec <= source.start_sec + .5
-                    and candidates[-1].end_sec >= source.end_sec - .5
-                    and sum(count_moras(item.text) for item in candidates) >= required_moras):
+            if candidates and sum(count_moras(item.text) for item in candidates) >= required_moras:
                 # More morae alone can be a Whisper hallucination. Compare the
                 # local retry with the original line on the same vocal audio.
                 try:
@@ -601,7 +701,8 @@ def analyze_audio(
                 semantic_evidence.append(Evidence(
                     f"audio-deficit-recovery-{index}", "soramimic_score.local_recovery",
                     "lyric-local-retry", candidate_ctc,
-                    {"source_segment_index": index, "window": [start, end],
+                    {"source_segment_index": index,
+                     "windows": [list(window) for window in windows],
                      "original_moras": counts[index], "recovered_moras":
                      sum(count_moras(item.text) for item in candidates),
                      "source_ctc": source_ctc, "recovered_ctc": candidate_ctc,
