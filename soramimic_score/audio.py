@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 import math
+import re
 import statistics
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -25,7 +26,9 @@ from .japanese import LyricSpan, ReadingCandidate, kana_to_moras
 from .line_windows import snap_line_windows_to_rests
 from .local_recovery import (coalesce_repeated_suffix_fragments, deficit_windows,
                              expand_repeated_vocalization_from_kana,
+                             has_tandem_repeat_note_support,
                              is_pathological_repeated_vocalization,
+                             normalize_repeated_vocalization,
                              repeated_vocalization_period, unowned_note_windows)
 from .note_runs import NoteRunConfig
 from .semantic import (MIN_CTC_MEDIAN_SCORE, contextual_non_lyric_template_families,
@@ -401,6 +404,8 @@ def analyze_audio(
 
     if lyrics is None:
         raw_recognized, merges = coalesce_repeated_suffix_fragments(raw_recognized)
+        raw_recognized = tuple(normalize_repeated_vocalization(line)
+                               for line in raw_recognized)
         for left, right in merges:
             semantic_evidence.append(Evidence(
                 f"audio-repeated-suffix-{left}", "soramimic_score.local_recovery",
@@ -459,6 +464,8 @@ def analyze_audio(
                     )
                 except Exception:
                     continue
+                candidates = tuple(normalize_repeated_vocalization(item)
+                                   for item in candidates)
                 recovered.extend(candidate for candidate in candidates
                                  if candidate.start_sec is not None
                                  and candidate.end_sec is not None
@@ -524,6 +531,8 @@ def analyze_audio(
                     adapters.lyric_recoverer(path, start, end), timed=True)
             except Exception:
                 return ()
+            candidates = tuple(normalize_repeated_vocalization(item)
+                               for item in candidates)
             return tuple(candidate for candidate in candidates
                          if candidate.start_sec is not None and candidate.end_sec is not None
                          and start <= candidate.start_sec < candidate.end_sec <= end
@@ -536,14 +545,24 @@ def analyze_audio(
             on_progress("歌詞の欠落区間を再確認しています")
         replacements: dict[int, tuple[LyricLine, ...]] = {}
         counts = tuple(count_moras(line.text) for line in recognized)
+        ratios = []
+        for line, count in zip(recognized, counts, strict=True):
+            effective = count + len(re.findall(r"[A-Za-z]+", line.text))
+            found = sum(line.start_sec <= (note.start_sec + note.end_sec) / 2 < line.end_sec
+                        for note in notes)
+            if effective >= 4 and found >= 2:
+                ratios.append(found / effective)
+        median_ratio = statistics.median(ratios) if ratios else 1.
         for index, start, end in deficit_windows(recognized, notes, counts):
             if index in replacements:
                 continue
             candidates = retry(start, end)
             source = recognized[index]
+            effective_source = counts[index] + len(re.findall(r"[A-Za-z]+", source.text))
+            required_moras = effective_source + max(2, math.ceil(effective_source * .25))
             if (candidates and candidates[0].start_sec <= source.start_sec + .5
                     and candidates[-1].end_sec >= source.end_sec - .5
-                    and sum(count_moras(item.text) for item in candidates) >= counts[index] + 2):
+                    and sum(count_moras(item.text) for item in candidates) >= required_moras):
                 # More morae alone can be a Whisper hallucination. Compare the
                 # local retry with the original line on the same vocal audio.
                 try:
@@ -561,7 +580,20 @@ def analyze_audio(
                     continue
                 source_ctc = statistics.median(item.confidence for item in source_moras)
                 candidate_ctc = statistics.median(item.confidence for item in candidate_moras)
-                if (candidate_ctc < MIN_CTC_MEDIAN_SCORE
+                recovered_count = sum(len(kana_to_moras(item.kana))
+                                      for item in candidate_readings)
+                note_count = sum(source.start_sec <= (note.start_sec + note.end_sec) / 2
+                                 < source.end_sec for note in notes)
+                tandem_support = has_tandem_repeat_note_support(
+                    "".join(item.text for item in candidates),
+                    source_moras=effective_source, recovered_moras=recovered_count,
+                    note_count=note_count, median_notes_per_mora=median_ratio)
+                weak_tandem_supported = (tandem_support and source_ctc > 0
+                                         and candidate_ctc >= source_ctc)
+                if (recovered_count < required_moras
+                        or recovered_count > note_count * 3
+                        or (candidate_ctc < MIN_CTC_MEDIAN_SCORE
+                            and not weak_tandem_supported)
                         or candidate_ctc < source_ctc * .5):
                     continue
                 replacements[index] = candidates
@@ -571,7 +603,8 @@ def analyze_audio(
                     {"source_segment_index": index, "window": [start, end],
                      "original_moras": counts[index], "recovered_moras":
                      sum(count_moras(item.text) for item in candidates),
-                     "source_ctc": source_ctc, "recovered_ctc": candidate_ctc},
+                     "source_ctc": source_ctc, "recovered_ctc": candidate_ctc,
+                     "tandem_repeat_support": tandem_support},
                 ))
         retained = tuple(item for index, line in enumerate(recognized)
                          for item in replacements.get(index, (line,)))
@@ -702,6 +735,7 @@ def analyze_audio(
                             path, retry_start, retry_end), timed=True)
                     except Exception:
                         continue
+                    raw = tuple(normalize_repeated_vocalization(item) for item in raw)
                     candidates = tuple(replace(candidate,
                                                start_sec=max(start, candidate.start_sec),
                                                end_sec=min(end, candidate.end_sec))

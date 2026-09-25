@@ -8,7 +8,9 @@ from soramimic_score.audio import (AlignedMora, AudioAdapters, LyricLine,
 from soramimic_score.local_recovery import (coalesce_repeated_suffix_fragments,
                                             deficit_windows,
                                             expand_repeated_vocalization_from_kana,
+                                            has_tandem_repeat_note_support,
                                             is_pathological_repeated_vocalization,
+                                            normalize_repeated_vocalization,
                                             repeated_vocalization_period,
                                             uncovered_note_windows,
                                             unowned_note_windows)
@@ -16,6 +18,39 @@ from soramimic_score.vocal_activity import VocalActivity
 
 
 class LocalRecoveryTests(unittest.TestCase):
+    def test_latin_refrain_preserves_whisper_count_in_kana(self):
+        self.assertEqual(normalize_repeated_vocalization(
+            LyricLine("la la la", 0, 1)).text, "ラララ")
+        self.assertEqual(normalize_repeated_vocalization(
+            LyricLine("明日は晴れ", 0, 1)).text, "明日は晴れ")
+
+        def readings(_path, chosen):
+            return tuple(ReadingSelection(line.text, "test", 1) for line in chosen)
+
+        def align(_path, _chosen, selected):
+            return tuple(AlignedMora(0, index, char, index * .25,
+                                     (index + 1) * .25, .9)
+                         for index, char in enumerate(selected[0].kana))
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "input.wav"
+            path.write_bytes(b"model adapter fixture")
+            score = analyze_audio(path, AudioAdapters(
+                readings, align,
+                lambda _: tuple(MelodyNote(i * .25, (i + 1) * .25, 60)
+                                for i in range(3)),
+                lambda _: (LyricLine("la la la", 0, .75),),
+            ))
+        self.assertEqual(score.score.canonical_text, "ラララ")
+
+    def test_tandem_retry_needs_repetition_and_better_note_fit(self):
+        options = dict(source_moras=4, recovered_moras=8,
+                       note_count=9, median_notes_per_mora=1.)
+        self.assertTrue(has_tandem_repeat_note_support("カキクケカキクケ", **options))
+        self.assertFalse(has_tandem_repeat_note_support("カキクケサシスセ", **options))
+        self.assertFalse(has_tandem_repeat_note_support(
+            "カキクケカキクケ", **{**options, "note_count": 4}))
+
     def test_stage3_note_ownership_and_retained_line_bound_recovery(self):
         notes = [SimpleNamespace(id=f"n{i}", start_sec=i * .25,
                                  end_sec=(i + 1) * .25) for i in range(24)]

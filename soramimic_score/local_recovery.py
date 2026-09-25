@@ -103,6 +103,32 @@ def repeated_vocalization_period(text: str) -> tuple[str, ...] | None:
     return None
 
 
+def normalize_repeated_vocalization(line: LyricLine) -> LyricLine:
+    """Preserve Whisper's observed repeat count in kana, including Latin ``la``."""
+    if repeated_vocalization_period(line.text) is None:
+        return line
+    moras = _vocalization_moras(line.text)
+    return replace(line, text="".join(moras)) if moras else line
+
+
+def has_tandem_repeat_note_support(text: str, *, source_moras: int,
+                                   recovered_moras: int, note_count: int,
+                                   median_notes_per_mora: float) -> bool:
+    """Permit a weak CTC retry only when a repeated phrase explains missing notes."""
+    normalized = _normalized(text)
+    minimum = max(4, math.ceil(len(normalized) * .45))
+    tandem = any(normalized[start:start + width]
+                 == normalized[start + width:start + width * 2]
+                 for width in range(len(normalized) // 2, minimum - 1, -1)
+                 for start in range(len(normalized) - width * 2 + 1))
+    required = source_moras + max(2, math.ceil(source_moras * .25))
+    if (not tandem or recovered_moras < required
+            or recovered_moras > note_count * 2):
+        return False
+    return (abs(note_count - median_notes_per_mora * recovered_moras)
+            < abs(note_count - median_notes_per_mora * source_moras))
+
+
 def is_pathological_repeated_vocalization(
     line: LyricLine, notes: Sequence[MelodyNote],
 ) -> bool:
