@@ -8,7 +8,8 @@ import unittest
 from unittest.mock import Mock, patch
 
 from soramimic_score import LyricLine
-from soramimic_score.readings import dictionary_readings
+from soramimic_score.readings import (dictionary_candidates, dictionary_readings,
+                                     select_acoustic_reading)
 
 
 @dataclass
@@ -31,6 +32,17 @@ class YomiReadingsTests(unittest.TestCase):
         })
         self.module.start()
         self.addCleanup(self.module.stop)
+
+    @unittest.skipUnless(importlib.util.find_spec("MeCab"), "audio dependencies not installed")
+    def test_alternate_word_segmentation_keeps_imayoru(self):
+        candidates, = dictionary_candidates((LyricLine("二人今夜に駆け出してく"),))
+        self.assertEqual(candidates[0], "フタリコンヤニカケダシテク")
+        self.assertIn("フタリイマヨルニカケダシテク", candidates)
+        choice = select_acoustic_reading(candidates, {
+            "mix": "フタリイマヨルニカケダシテク",
+            "vocals": "フタリイマヨルニカケダシテク",
+        })
+        self.assertEqual(choice.kana, "フタリイマヨルニカケダシテク")
 
     def test_yomi_first_with_unidic_alternatives_and_both_origins_on_duplicates(self):
         with patch("soramimic_score.readings.dictionary_candidates",

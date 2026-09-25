@@ -36,26 +36,26 @@ def _node_reading(node):
 
 
 def dictionary_candidates(lines):
-    """Retain distinct readings from 32 dictionary analyses, regardless of length."""
+    """Retain distinct readings from eight dictionary analyses, including alternate splits."""
     import MeCab
     import unidic_lite
 
     tagger = MeCab.Tagger(f'-d "{unidic_lite.DICDIR}"')
     output = []
     for line in lines:
-        primary, surfaces = _node_reading(tagger.parseToNode(line.text))
+        primary, _ = _node_reading(tagger.parseToNode(line.text))
         candidates = [primary]
         tagger.parseNBestInit(line.text)
-        for _ in range(32):
+        for _ in range(8):
             node = tagger.nextNode()
             if node is None:
                 break
             try:
-                kana, alternative_surfaces = _node_reading(node)
+                kana, _ = _node_reading(node)
             except ValueError:
                 # An unknown alternative must not invalidate the primary reading.
                 continue
-            if alternative_surfaces == surfaces and kana not in candidates:
+            if kana not in candidates:
                 candidates.append(kana)
         output.append(tuple(candidates))
     return tuple(output)
