@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 from .alignment import ObservedSingingUnit, build_known_lyrics_document
 from .document import ScoreDocument, compile_score
 from .ir import Boundary, Evidence, IntermediateRepresentation, NoteCandidate
-from .japanese import LyricSpan, ReadingCandidate, kana_to_moras
+from .japanese import LyricSpan, ReadingCandidate, kana_to_moras, mora_vowel
 from .line_windows import snap_line_windows_to_rests
 from .local_recovery import (coalesce_repeated_suffix_fragments, deficit_windows,
                              expand_repeated_vocalization_from_kana,
@@ -114,6 +114,7 @@ class AudioAdapters:
     lyric_recoverer: LyricRecoverer | None = None
     repetition_evidence: RepetitionEvidence | None = None
     vocal_activity: VocalActivityEvidence | None = None
+    repetition_evidence_mix: RepetitionEvidence | None = None
 
 
 class AudioPipelineError(RuntimeError):
@@ -728,8 +729,10 @@ def analyze_audio(
                 if not evidence.supported:
                     continue
                 best = None
-                for retry_start, retry_end in ((start, end),
-                                               (max(0., start - .5), end + .5)):
+                fallback = []
+                for source, retry_start, retry_end in (
+                        ("exact", start, end),
+                        ("padded", max(0., start - .5), end + .5)):
                     try:
                         raw = _validate_lines(adapters.lyric_recoverer(
                             path, retry_start, retry_end), timed=True)
@@ -762,12 +765,86 @@ def analyze_audio(
                         continue
                     mora_count = sum(len(kana_to_moras(item.kana)) for item in selected)
                     ctc = statistics.median(item.confidence for item in aligned) if aligned else 0.
+                    reasons = []
                     if (mora_count < max(4, math.ceil(note_count * .25))
-                            or mora_count > note_count * 2
-                            or ctc < MIN_CTC_MEDIAN_SCORE):
+                            or mora_count > note_count * 2):
+                        reasons.append("detail")
+                    if ctc < MIN_CTC_MEDIAN_SCORE:
+                        reasons.append("ctc")
+                    fallback.append((source, candidates, selected, tuple(reasons)))
+                    if reasons:
                         continue
                     if best is None or ctc > best[0]:
-                        best = (ctc, candidates)
+                        best = (ctc, candidates, source)
+                if best is None and fallback and (adapters.repetition_evidence is not None
+                                                   or adapters.repetition_evidence_mix is not None):
+                    exact = next((item for item in fallback if item[0] == "exact"), None)
+                    repeated = (tuple(item for item in exact[1]
+                                      if repeated_vocalization_period(item.text) is not None)
+                                if exact else ())
+                    if repeated:
+                        windows_for_kana = tuple((item.start_sec, item.end_sec)
+                                                 for item in repeated)
+                        for view, kana_adapter in (("mix", adapters.repetition_evidence_mix),
+                                                   ("vocals", adapters.repetition_evidence)):
+                            if kana_adapter is None:
+                                continue
+                            try:
+                                evidence_texts = kana_adapter(path, windows_for_kana)
+                            except Exception:
+                                continue
+                            if len(evidence_texts) != len(repeated):
+                                continue
+                            for source_line, evidence_text in zip(
+                                    repeated, evidence_texts, strict=True):
+                                expanded = expand_repeated_vocalization_from_kana(
+                                    source_line, evidence_text, notes)
+                                if expanded is None:
+                                    continue
+                                try:
+                                    selected = _validate_readings((expanded,), _run_adapter(
+                                        "readings", adapters.reading_selector,
+                                        path, (expanded,)))
+                                    aligned = _validate_moras(selected, _run_adapter(
+                                        "mora alignment", adapters.mora_aligner,
+                                        path, (expanded,), selected))
+                                except Exception:
+                                    continue
+                                ctc = statistics.median(item.confidence for item in aligned)
+                                if ctc >= MIN_CTC_MEDIAN_SCORE and (best is None or ctc > best[0]):
+                                    best = (ctc, (expanded,), f"kana-repeat-{view}")
+                if best is None and len(fallback) == 2:
+                    exact, padded = fallback
+                    if exact[3] == padded[3] == ("ctc",):
+                        try:
+                            exact_vowels = tuple(mora_vowel(mora) for reading in exact[2]
+                                                 for mora in kana_to_moras(reading.kana))
+                            padded_vowels = tuple(mora_vowel(mora) for reading in padded[2]
+                                                  for mora in kana_to_moras(reading.kana))
+                        except ValueError:
+                            exact_vowels, padded_vowels = (), ()
+                        bounds_agree = (abs(exact[1][0].start_sec - padded[1][0].start_sec) <= .6
+                                        and abs(exact[1][-1].end_sec - padded[1][-1].end_sec) <= .6)
+                        if (bounds_agree and exact_vowels == padded_vowels
+                                and len(exact_vowels) >= max(4, math.ceil(note_count * .25))
+                                and all(vowel in {"a", "i", "u", "e", "o"}
+                                        for vowel in exact_vowels)):
+                            vowels = {"a": "ア", "i": "イ", "u": "ウ",
+                                      "e": "エ", "o": "オ"}
+                            vowel_line = LyricLine("".join(vowels[item]
+                                                       for item in exact_vowels), start, end)
+                            try:
+                                selected = _validate_readings((vowel_line,), _run_adapter(
+                                    "readings", adapters.reading_selector,
+                                    path, (vowel_line,)))
+                                aligned = _validate_moras(selected, _run_adapter(
+                                    "mora alignment", adapters.mora_aligner,
+                                    path, (vowel_line,), selected))
+                            except Exception:
+                                aligned = ()
+                            ctc = statistics.median(item.confidence for item in aligned) if aligned else 0.
+                            if ctc >= MIN_CTC_MEDIAN_SCORE:
+                                best = (ctc, (vowel_line,), "vowel-continuation")
                 if best is None:
                     continue
                 additions.extend(best[1])
@@ -775,7 +852,7 @@ def analyze_audio(
                     f"audio-gap-recovery-{index}", "soramimic_score.local_recovery",
                     "lyric-local-retry", best[0],
                     {"window": [start, end], "note_count": note_count,
-                     "recovered_count": len(best[1])},
+                     "recovered_count": len(best[1]), "source": best[2]},
                 ))
             if additions:
                 lines = _validate_lines(sorted((*lines, *additions),

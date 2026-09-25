@@ -176,7 +176,8 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
                              local_files_only=config.local_files_only)
         try:
             segments, _ = model.transcribe(samples, language="ja", vad_filter=False,
-                                           condition_on_previous_text=False)
+                                           condition_on_previous_text=False,
+                                           temperature=0.0)
             lines = []
             for segment in segments:
                 onset = max(start, start + float(segment.start))
@@ -368,6 +369,9 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
         source = vocals_path or path
         return kana_views({"vocals": source}, windows)["vocals"]
 
+    def repeat_evidence_mix(path, windows):
+        return kana_views({"mix": path}, windows)["mix"]
+
     def kana_views(paths, windows):
         if shared is None:
             return transcribe_kana_views(paths, windows, config)
@@ -390,4 +394,5 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
 
     return AudioAdapters(select_readings if config.acoustic_readings else dictionary_readings,
                          align, melody, recognize, lyric_reading, recover_window,
-                         repeat_evidence, vocal_activity if vocals_path is not None else None)
+                         repeat_evidence, vocal_activity if vocals_path is not None else None,
+                         repeat_evidence_mix if vocals_path is not None else None)

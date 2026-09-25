@@ -178,7 +178,8 @@ class ModelTests(unittest.TestCase):
                        {"sr": 16000, "mono": True, "offset": 10, "duration": 2}), calls)
         self.assertEqual(lines, (LyricLine("空", 10.2, 10.7),))
         self.assertIn(("samples", 32000, {"language": "ja", "vad_filter": False,
-                                          "condition_on_previous_text": False}), calls)
+                                          "condition_on_previous_text": False,
+                                          "temperature": 0.0}), calls)
 
     @unittest.skipUnless(importlib.util.find_spec("soramimic_yomi") and importlib.util.find_spec("MeCab"),
                          "audio dependencies not installed")
