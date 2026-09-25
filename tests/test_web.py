@@ -145,6 +145,16 @@ class ScoreWebTests(unittest.TestCase):
                 time.sleep(.02)
             self.assertEqual(state, "done")
             self.assertTrue(self.client.get(f"/api/jobs/{job}/resing/audio").content.startswith(b"RIFF"))
+            with sqlite3.connect(Path(self.temporary.name) / "jobs.sqlite3") as connection:
+                connection.execute("UPDATE jobs SET synth_backend=NULL WHERE id=?", (job,))
+            self.assertIsNone(self.client.get(f"/api/jobs/{job}/resing").json()["state"])
+            self.assertEqual(self.client.get(f"/api/jobs/{job}/resing/audio").status_code, 409)
+            self.assertEqual(self.client.post(f"/api/jobs/{job}/resing").status_code, 200)
+            for _ in range(100):
+                if self.client.get(f"/api/jobs/{job}/resing").json()["state"] == "done":
+                    break
+                time.sleep(.02)
+            self.assertEqual(self.client.get(f"/api/jobs/{job}/resing").json()["state"], "done")
 
     def test_guidelines_explain_retention(self):
         response = self.client.get("/guidelines")

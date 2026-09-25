@@ -48,8 +48,8 @@ audio{width:100%;margin:14px 0}canvas{width:100%;height:auto;border-radius:12px;
   <h2>ピアノロール・歌詞プレビュー</h2>
   <audio id="player" controls preload="metadata"></audio>
   <p class="details"><a id="result-link" href="#">この結果へのリンク</a>（約1時間有効）</p>
-  <div><button class="secondary" id="original-audio" type="button">元音源を再生</button><button class="secondary" id="resing-audio" type="button">VOICEVOXで歌い直す</button><span class="details" id="resing-status" role="status"></span></div>
-  <p class="details">歌い直しは音符と歌詞から波音リツで合成し、分離した伴奏を重ねます。VOICEVOX:波音リツ。分離前の結果では歌声のみです。</p>
+  <div><button class="secondary" id="original-audio" type="button">元音源を再生</button><button class="secondary" id="resing-audio" type="button">PrettyPitchで歌い直す</button><span class="details" id="resing-status" role="status"></span></div>
+  <p class="details">歌い直しは推定した音符と歌詞から<a href="https://github.com/wavtechyukky/PrettyPitch">PrettyPitch</a>・<a href="https://www.canon-voice.com/voicebanks/">波音リツ</a>で合成し、分離した伴奏を重ねます。非商用の試験用モデルです。分離前の結果では歌声のみです。</p>
   <div class="screen"><canvas id="roll" width="1280" height="480" aria-label="音符とカラオケ字幕のピアノロール"></canvas></div>
   <button class="secondary" id="record" type="button">プレビュー動画を保存</button>
   <h2>ダウンロード</h2><div class="downloads" id="downloads"></div>
@@ -171,7 +171,7 @@ async function loadJob(id){
     data=await json(`/api/jobs/${jobId}/score`);buildLineWindows();player.src=`/api/jobs/${jobId}/audio`;
     document.querySelector('#result-link').href=`/?job=${jobId}`;
     const voiceState=await json(`/api/jobs/${jobId}/resing`);
-    if(voiceState.state==='done')document.querySelector('#resing-audio').textContent='VOICEVOXの歌声を再生';
+    if(voiceState.state==='done')document.querySelector('#resing-audio').textContent='PrettyPitchの歌声を再生';
     document.querySelector('#downloads').replaceChildren();
     for(const [ext,label] of [['json','歌詞・音符JSON'],['mid','MIDI'],['musicxml','MusicXML'],['srt','SRT字幕'],['lrc','LRC歌詞']]){
       const a=document.createElement('a');a.className='link';a.href=`/api/jobs/${jobId}/download/${ext}`;a.download=`score.${ext}`;a.textContent=label;document.querySelector('#downloads').append(a);
@@ -222,11 +222,11 @@ document.querySelector('#resing-audio').addEventListener('click',async()=>{
       if(choice===playbackChoice)message.textContent=state.stage||'歌唱合成の順番を待っています';
       await pause(2000);
     }
-    button.textContent='VOICEVOXの歌声を再生';
+    button.textContent='PrettyPitchの歌声を再生';
     if(choice!==playbackChoice)return;
     const t=player.currentTime;player.src=`/api/jobs/${jobId}/resing/audio`;
     player.currentTime=t;await player.play();
-    if(choice===playbackChoice)message.textContent='VOICEVOX:波音リツの歌声を再生中';
+    if(choice===playbackChoice)message.textContent='PrettyPitch:波音リツの歌声を再生中';
   }catch(error){if(choice===playbackChoice)message.textContent=error.message}finally{button.disabled=false}
 });
 player.addEventListener('ended',()=>{

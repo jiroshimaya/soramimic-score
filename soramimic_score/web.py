@@ -82,7 +82,7 @@ def create_app(*, data_root: Path | None = None, analyzer=None, public: bool | N
             conn.execute("ALTER TABLE jobs ADD COLUMN stage TEXT")
         if "finished" not in {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}:
             conn.execute("ALTER TABLE jobs ADD COLUMN finished TEXT")
-        for column in ("synth_state", "synth_stage", "synth_error"):
+        for column in ("synth_state", "synth_stage", "synth_error", "synth_backend"):
             if column not in {row[1] for row in conn.execute("PRAGMA table_info(jobs)")}:
                 conn.execute(f"ALTER TABLE jobs ADD COLUMN {column} TEXT")
         conn.execute("CREATE TABLE IF NOT EXISTS quota (day TEXT NOT NULL, ip TEXT NOT NULL, "
@@ -183,10 +183,8 @@ def create_app(*, data_root: Path | None = None, analyzer=None, public: bool | N
             def on_progress(done: int, total: int) -> None:
                 with sqlite3.connect(db) as conn:
                     conn.execute("UPDATE jobs SET synth_state='running', synth_stage=? WHERE id=?",
-                                 (f"VOICEVOXで歌唱を合成中 ({done}/{total})", job))
+                                 (f"PrettyPitchで歌唱を合成中 ({done}/{total})", job))
             synthesize(document, output,
-                       engine_url=os.environ.get("SORAMIMIC_SCORE_VOICEVOX_URL",
-                                                 "http://127.0.0.1:50021"),
                        duration_sec=duration, on_progress=on_progress,
                        excluded_utterance_ids=excluded)
             accompaniment = job_dir / "accompaniment.flac"
@@ -360,10 +358,12 @@ def create_app(*, data_root: Path | None = None, analyzer=None, public: bool | N
         job = _job_id(job)
         _completed(root, db, job)
         with sqlite3.connect(db) as conn:
-            state, error = conn.execute("SELECT synth_state,synth_error FROM jobs WHERE id=?",
-                                        (job,)).fetchone()
-            if state is None or (state == "failed" and error == "合成が中断されました"):
-                conn.execute("UPDATE jobs SET synth_state='queued', synth_stage='順番を待っています', "
+            state, error, backend = conn.execute(
+                "SELECT synth_state,synth_error,synth_backend FROM jobs WHERE id=?",
+                (job,)).fetchone()
+            if state is None or backend != "prettypitch" or (state == "failed" and error == "合成が中断されました"):
+                conn.execute("UPDATE jobs SET synth_state='queued', synth_backend='prettypitch', "
+                             "synth_stage='順番を待っています', "
                              "synth_error=NULL WHERE id=?", (job,))
                 synth_pool.submit(resing, job)
                 state = "queued"
@@ -374,8 +374,10 @@ def create_app(*, data_root: Path | None = None, analyzer=None, public: bool | N
         job = _job_id(job)
         _completed(root, db, job)
         with sqlite3.connect(db) as conn:
-            row = conn.execute("SELECT synth_state,synth_stage,synth_error FROM jobs WHERE id=?",
+            row = conn.execute("SELECT synth_state,synth_stage,synth_error,synth_backend FROM jobs WHERE id=?",
                                (job,)).fetchone()
+        if row[3] != "prettypitch":
+            return {"state": None, "stage": None, "error": None}
         return {"state": row[0], "stage": row[1], "error": row[2]}
 
     @app.get("/api/jobs/{job}/resing/audio")
