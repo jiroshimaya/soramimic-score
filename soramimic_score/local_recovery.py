@@ -111,6 +111,44 @@ def normalize_repeated_vocalization(line: LyricLine) -> LyricLine:
     return replace(line, text="".join(moras)) if moras else line
 
 
+def adjacent_repeat_groups(lines: Sequence[LyricLine]
+                           ) -> tuple[tuple[int, int, tuple[str, ...]], ...]:
+    """Group touching Whisper fragments of the same nonlexical refrain."""
+    groups = []
+    start = 0
+    while start < len(lines):
+        period = repeated_vocalization_period(lines[start].text)
+        if period is None:
+            start += 1
+            continue
+        end = start + 1
+        while end < len(lines):
+            following = repeated_vocalization_period(lines[end].text)
+            if (following != period or lines[end].start_sec is None
+                    or lines[end - 1].end_sec is None
+                    or lines[end].end_sec is None
+                    or lines[start].start_sec is None
+                    or lines[end].start_sec - lines[end - 1].end_sec > .25
+                    or lines[end].end_sec - lines[start].start_sec > 16):
+                break
+            end += 1
+        if end - start >= 2:
+            groups.append((start, end, period))
+        start = end
+    return tuple(groups)
+
+
+def duration_repeated_vocalization_candidate(
+    source: LyricLine, recovered: Sequence[LyricLine], count: int,
+) -> LyricLine | None:
+    """Repeat a short phrase only when every local retry hears its mora family."""
+    period = repeated_vocalization_period(source.text)
+    if (count < 2 or not recovered or period is None
+            or {repeated_vocalization_period(item.text) for item in recovered} != {period}):
+        return None
+    return replace(source, text=source.text * count)
+
+
 def has_tandem_repeat_note_support(text: str, *, source_moras: int,
                                    recovered_moras: int, note_count: int,
                                    median_notes_per_mora: float) -> bool:

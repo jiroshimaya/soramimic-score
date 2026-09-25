@@ -5,8 +5,10 @@ from types import SimpleNamespace
 
 from soramimic_score.audio import (AlignedMora, AudioAdapters, LyricLine,
                                    MelodyNote, ReadingSelection, analyze_audio)
-from soramimic_score.local_recovery import (coalesce_repeated_suffix_fragments,
+from soramimic_score.local_recovery import (adjacent_repeat_groups,
+                                            coalesce_repeated_suffix_fragments,
                                             deficit_windows,
+                                            duration_repeated_vocalization_candidate,
                                             expand_repeated_vocalization_from_kana,
                                             has_tandem_repeat_note_support,
                                             is_pathological_repeated_vocalization,
@@ -18,6 +20,69 @@ from soramimic_score.vocal_activity import VocalActivity
 
 
 class LocalRecoveryTests(unittest.TestCase):
+    def test_adjacent_repeat_group_uses_one_acoustic_count(self):
+        lines = (LyricLine("ララ", 0, 2), LyricLine("ララ", 2, 4))
+        self.assertEqual(adjacent_repeat_groups(lines), ((0, 2, ("ラ",)),))
+        notes = tuple(MelodyNote(i * .5, (i + 1) * .5, 60) for i in range(8))
+        calls = []
+
+        def readings(_path, chosen):
+            return tuple(ReadingSelection(line.text, "test", 1) for line in chosen)
+
+        def align(_path, chosen, selected):
+            return tuple(AlignedMora(index, offset, char,
+                                     line.start_sec + offset * .2,
+                                     line.start_sec + (offset + 1) * .2, .9)
+                         for index, (line, reading) in enumerate(zip(chosen, selected))
+                         for offset, char in enumerate(reading.kana))
+
+        def evidence(_path, windows):
+            calls.append(windows)
+            return ("ラ" * 6,) if len(windows) == 1 else ("ラ" * 4,) * len(windows)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "input.wav"
+            path.write_bytes(b"model adapter fixture")
+            score = analyze_audio(path, AudioAdapters(
+                readings, align, lambda _: notes, lambda _: lines,
+                repetition_evidence=evidence))
+        self.assertEqual(score.score.canonical_text, "ラ" * 6)
+        self.assertEqual(calls, [((0, 4),)])
+
+    def test_deficit_retry_combines_separated_note_groups(self):
+        lines = (LyricLine("カキ", 0, 5), LyricLine("サシスセ", 6, 6.8),
+                 LyricLine("タチツテ", 7, 7.8))
+        notes = tuple(MelodyNote(start + i * .2, start + (i + 1) * .2, 60)
+                      for start in (1, 3, 6, 7) for i in range(4))
+        calls = []
+
+        def readings(_path, chosen):
+            return tuple(ReadingSelection(line.text, "test", 1) for line in chosen)
+
+        def align(_path, chosen, selected):
+            return tuple(AlignedMora(index, offset, char,
+                                     line.start_sec + offset * .1,
+                                     line.start_sec + (offset + 1) * .1, .9)
+                         for index, (line, reading) in enumerate(zip(chosen, selected))
+                         for offset, char in enumerate(reading.kana))
+
+        def retry(_path, start, end):
+            calls.append((start, end))
+            onset = 1 if start < 2 else 3
+            return (LyricLine("カキクケ", onset, onset + .8),)
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "input.wav"
+            path.write_bytes(b"model adapter fixture")
+            score = analyze_audio(path, AudioAdapters(
+                readings, align, lambda _: notes, lambda _: lines,
+                lyric_reading=lambda text: text, lyric_recoverer=retry))
+        self.assertEqual(calls, [(.5, 2.3), (2.5, 4.3)])
+        self.assertEqual(score.score.canonical_text,
+                         "カキクケ\nカキクケ\nサシスセ\nタチツテ")
+        self.assertIsNone(duration_repeated_vocalization_candidate(
+            LyricLine("ラナラナ", 0, 2), (LyricLine("ララ", 0, 2),), 2))
+
     def test_latin_refrain_preserves_whisper_count_in_kana(self):
         self.assertEqual(normalize_repeated_vocalization(
             LyricLine("la la la", 0, 1)).text, "ラララ")
