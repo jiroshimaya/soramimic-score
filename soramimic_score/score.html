@@ -60,6 +60,8 @@ audio{width:100%;margin:14px 0}canvas{width:100%;height:auto;border-radius:12px;
 <script>
 const form=document.querySelector('#form'),status=document.querySelector('#status'),submit=document.querySelector('#submit');
 const result=document.querySelector('#result'),player=document.querySelector('#player'),canvas=document.querySelector('#roll'),ctx=canvas.getContext('2d');
+function sizeRoll(){const width=matchMedia('(max-width:600px)').matches?640:1280;if(canvas.width!==width)canvas.width=width}
+sizeRoll();addEventListener('resize',sizeRoll);
 const audioFile=document.querySelector('#audio-file'),uploadZone=document.querySelector('#upload-zone');
 const selection=document.querySelector('#selection'),selectedName=document.querySelector('#selected-name');
 const recordButton=document.querySelector('#record-audio'),progress=document.querySelector('#progress'),progressLabel=document.querySelector('#progress-label');
