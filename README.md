@@ -48,10 +48,20 @@ flowchart TD
 モーラの時刻は主に分離したボーカルから、音符は原音から推定します。
 歌詞認識や音高推定のモデルは交換できる構成で、モデルの重みは同梱しません。
 
+## 動作要件
+
+| 項目 | 要件 |
+| --- | --- |
+| ソフトウェア | Python 3.11 以降、Git、FFmpeg、FFprobe。ブラウザの起動例には `uv` も使います。 |
+| 計算装置 | CPU で実行できます。CUDA 対応 GPU は任意です。 |
+| モデル | [SheetSage2](https://huggingface.co/m-a-p/SheetSage2) と [MERT-v2-FullSong](https://huggingface.co/m-a-p/MERT-v2-FullSong) をローカルに配置します。Whisper などのモデルは初回使用時に取得します。 |
+| ストレージ | 上記 2 モデルの重みだけで約 2.8 GB 必要です。ほかのモデル、依存ライブラリ、解析中の一時ファイルの容量も別に必要です。 |
+
+RAM と GPU メモリの最低容量は、音源の長さや使用するモデルによって変わるため、まだ検証できていません。
+
 ## ブラウザで使う
 
-Python 3.11 以降、Git、音声モデル、FFmpeg、FFprobe を用意します。
-SheetSage2 と MERT-v2-FullSong は、利用条件を確認してローカルに配置してください。
+必要なソフトウェアとモデルを用意し、各モデルの利用条件を確認してください。
 `SORAMIMIC_SCORE_DATA` には Git リポジトリ外の保存先を指定します。
 次のパスは配置先の例です。
 
@@ -68,15 +78,13 @@ uv run --extra audio --extra web uvicorn soramimic_score.web:app --host 127.0.0.
 
 ## コマンドラインで使う
 
-Python 3.11 以降と Git を用意します。
-圧縮音声を入力する場合は FFmpeg も必要です。
+上記のソフトウェアとモデルを用意します。
 ソースを取得したディレクトリで、音声用の依存ライブラリをインストールします。
 
 ```sh
 pip install '.[audio]'
 ```
 
-[SheetSage2](https://huggingface.co/m-a-p/SheetSage2) と [MERT-v2-FullSong](https://huggingface.co/m-a-p/MERT-v2-FullSong) は、利用条件を確認してローカルに配置してください。
 以下のパスは配置先の例です。
 
 ```sh
