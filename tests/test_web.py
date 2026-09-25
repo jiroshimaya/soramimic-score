@@ -157,6 +157,15 @@ class ScoreWebTests(unittest.TestCase):
                     break
                 time.sleep(.02)
             self.assertEqual(self.client.get(f"/api/jobs/{job}/resing").json()["state"], "done")
+            with sqlite3.connect(Path(self.temporary.name) / "jobs.sqlite3") as connection:
+                connection.execute("UPDATE jobs SET synth_state='failed', synth_error='歌唱合成に失敗しました' "
+                                   "WHERE id=?", (job,))
+            self.assertEqual(self.client.post(f"/api/jobs/{job}/resing").json()["state"], "queued")
+            for _ in range(100):
+                if self.client.get(f"/api/jobs/{job}/resing").json()["state"] == "done":
+                    break
+                time.sleep(.02)
+            self.assertEqual(self.client.get(f"/api/jobs/{job}/resing").json()["state"], "done")
 
     def test_resinging_is_unavailable_without_renderer(self):
         with patch.dict("os.environ", {"SORAMIMIC_SCORE_SHEETSAGE_MODEL": "a",

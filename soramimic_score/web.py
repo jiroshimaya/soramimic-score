@@ -366,10 +366,10 @@ def create_app(*, data_root: Path | None = None, analyzer=None, public: bool | N
         if not available():
             raise HTTPException(503, "このサーバーではPrettyPitchを利用できません")
         with sqlite3.connect(db) as conn:
-            state, error, backend = conn.execute(
-                "SELECT synth_state,synth_error,synth_backend FROM jobs WHERE id=?",
+            state, backend = conn.execute(
+                "SELECT synth_state,synth_backend FROM jobs WHERE id=?",
                 (job,)).fetchone()
-            if state is None or backend != "prettypitch" or (state == "failed" and error == "合成が中断されました"):
+            if state in (None, "failed") or backend != "prettypitch":
                 conn.execute("UPDATE jobs SET synth_state='queued', synth_backend='prettypitch', "
                              "synth_stage='順番を待っています', "
                              "synth_error=NULL WHERE id=?", (job,))
