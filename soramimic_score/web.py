@@ -138,6 +138,8 @@ def create_app(*, data_root: Path | None = None, analyzer=None, public: bool | N
                 sheetsage_base=Path(os.environ["SORAMIMIC_SCORE_SHEETSAGE_BASE"]),
                 device=os.environ.get("SORAMIMIC_SCORE_DEVICE", "cpu"),
                 local_files_only=os.environ.get("SORAMIMIC_SCORE_LOCAL_ONLY") == "1",
+                shared_inference_url=os.environ.get("SORAMIMIC_AUDIO_INFERENCE_URL"),
+                shared_inference_priority="public" if is_public else "dev",
             )
             lyrics = tuple(line for line in (job_dir / "lyrics.txt").read_text(
                 encoding="utf-8").splitlines() if line.strip()) if supplied else None

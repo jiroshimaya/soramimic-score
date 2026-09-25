@@ -12,10 +12,67 @@ from unittest.mock import patch
 from soramimic_score import ModelConfig, LyricLine, analyze_audio, load
 from soramimic_score.__main__ import analyze_main
 from soramimic_score.models import create_adapters, dictionary_readings, read_melody_lab
+from soramimic_score.shared_inference import SharedInference
 from tests import test_audio_pipeline as fixtures
 
 
 class ModelTests(unittest.TestCase):
+    def test_shared_inference_job_is_deleted_after_result(self):
+        calls = []
+        class Response:
+            def __init__(self, body):
+                self.body = body
+            def raise_for_status(self):
+                pass
+            def json(self):
+                return self.body
+        with tempfile.TemporaryDirectory() as directory:
+            audio = Path(directory) / "audio.wav"
+            audio.write_bytes(b"audio")
+            with patch("soramimic_score.shared_inference.requests.get", side_effect=[
+                Response({"status": "ok", "api": {"name": "soramimic-audio-inference",
+                                                 "version": 1},
+                          "capabilities": {"demucs": True, "whisper": True,
+                                           "kana_whisper": True, "sheetsage2": True}}),
+                Response({"status": "done", "result": {"lines": []}}),
+            ]), patch("soramimic_score.shared_inference.requests.post",
+                     return_value=Response({"id": "job1"})) as post, \
+                 patch("soramimic_score.shared_inference.requests.delete",
+                       side_effect=lambda url, **kwargs: calls.append(url)):
+                client = SharedInference("http://localhost:8320", "dev")
+                self.assertEqual(client.run("whisper", audio, {"device": "auto"}),
+                                 {"lines": []})
+            self.assertEqual(post.call_args.kwargs["data"]["priority"], "dev")
+            self.assertEqual(calls, ["http://localhost:8320/v1/jobs/job1"])
+
+    def test_model_adapters_use_shared_worker_for_expensive_models(self):
+        calls = []
+        class Shared:
+            def run(self, kind, audio, parameters, artifacts=None):
+                calls.append((kind, audio, parameters))
+                if kind == "whisper":
+                    return {"requested_language": "ja",
+                            "requested_temperature": parameters.get("temperature"),
+                            "lines": [{"text": " 空 ", "start_sec": .01,
+                                       "end_sec": .05}]}
+                if kind == "sheetsage":
+                    return {"notes": [{"start_sec": 0, "end_sec": .1,
+                                       "midi_note": 60}]}
+                if kind == "kana-whisper":
+                    return {"texts": ["ソラ"] * len(parameters["windows"])}
+                raise AssertionError(kind)
+        audio = self.root / "audio.wav"
+        self.write_audio(audio)
+        adapters = create_adapters(self.config, vocals_path=audio, shared=Shared())
+        self.assertEqual(adapters.lyric_recognizer(audio), (LyricLine("空", .01, .05),))
+        self.assertEqual(adapters.melody_transcriber(audio)[0].midi_pitch, 60)
+        self.assertEqual(adapters.lyric_recoverer(audio, 0, .1),
+                         (LyricLine("空", .01, .05),))
+        self.assertEqual(adapters.repetition_evidence(audio, ((0, .1),)), ("ソラ",))
+        self.assertEqual([kind for kind, *_ in calls],
+                         ["whisper", "sheetsage", "whisper", "kana-whisper"])
+        self.assertEqual(calls[2][2]["temperature"], 0.)
+
     @staticmethod
     def write_audio(path):
         with wave.open(str(path), "wb") as wav:
