@@ -66,8 +66,13 @@ class ModelTests(unittest.TestCase):
         adapters = create_adapters(self.config, vocals_path=audio, shared=Shared())
         self.assertEqual(adapters.lyric_recognizer(audio), (LyricLine("空", .01, .05),))
         self.assertEqual(adapters.melody_transcriber(audio)[0].midi_pitch, 60)
-        self.assertEqual(adapters.lyric_recoverer(audio, 0, .1),
-                         (LyricLine("空", .01, .05),))
+        with patch.dict(sys.modules, {
+            "librosa": SimpleNamespace(load=lambda *args, **kwargs: ([0.] * 1600, 16000)),
+            "soundfile": SimpleNamespace(write=lambda path, *args, **kwargs:
+                                         Path(path).write_bytes(b"window")),
+        }):
+            self.assertEqual(adapters.lyric_recoverer(audio, 0, .1),
+                             (LyricLine("空", .01, .05),))
         self.assertEqual(adapters.repetition_evidence(audio, ((0, .1),)), ("ソラ",))
         self.assertEqual([kind for kind, *_ in calls],
                          ["whisper", "sheetsage", "whisper", "kana-whisper"])
