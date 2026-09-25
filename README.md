@@ -48,6 +48,18 @@ flowchart TD
 モーラの時刻は主に分離したボーカルから、音符は原音から推定します。
 歌詞認識や音高推定のモデルは交換できる構成で、モデルの重みは同梱しません。
 
+## 現行版の解析サンプル
+
+[PJS コーパス](https://sites.google.com/site/shinnosuketakamichi/research-topics/pjs_corpus)の `pjs001`（16 秒）を、歌詞を入力せずに Soramimic Score で解析しました。原音を聴きながら、Score の音符と認識歌詞を正解譜面・読みと比較できます。水色が Score の未補正の音符、黄色の枠が正解譜面です。
+
+[![PJS pjs001 の解析結果と正解譜面を重ねたピアノロール](https://github.com/soramimic/soramimic-score/releases/download/sample-pjs001-20260926/pjs001-poster.png)](https://github.com/soramimic/soramimic-score/releases/download/sample-pjs001-20260926/pjs001-score-sample.mp4)
+
+[音声付きの 16 秒動画を見る](https://github.com/soramimic/soramimic-score/releases/download/sample-pjs001-20260926/pjs001-score-sample.mp4)
+
+この例では音符を 42 個推定し、正解譜面も 42 個です。しかし、推定音高が全体に 1 オクターブ高いため、開始時刻 ±50 ms・音高 ±50 セントで採点した補正前の音符 F1 は **0%** です。原因を切り分けるため、推定音高を一律 12 半音下げて採点すると **85.7%** になります。後者は診断用の値で、現在の出力精度ではありません。1 例だけの結果なので、一般的な精度を示すものでもありません。
+
+音源と正解譜面は PJS コーパスの Junya Koguchi、Shinnosuke Takamichi によるものです。動画と画像は [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/) で公開しています。
+
 ## 精度評価（関連実装の参考値）
 
 以下は Score へ移植する前の歌詞付き自動採譜パイプラインで測った値です。現行の Soramimic Score 自体の精度を示すものではありません。
