@@ -19,15 +19,21 @@ class RubyTests(unittest.TestCase):
             ])
 
     def test_nonstandard_pronunciation_is_localized_to_one_word(self):
-        self.assertEqual(ruby_segments("明日は晴れ", "アスワハレ"),
-                         [{"text": "明日", "reading": "アス"},
-                          {"text": "は", "reading": ""},
-                          {"text": "晴", "reading": "ハ"},
-                          {"text": "れ", "reading": ""}])
+        tokens = [{"surface_form": s, "pronunciation": p} for s, p in
+                  (("明日", "アシタ"), ("は", "ワ"), ("晴れ", "ハレ"))]
+        with patch.dict(sys.modules, soramimic_yomi=SimpleNamespace(get_tokens=lambda *_args, **_kw: tokens)):
+            self.assertEqual(ruby_segments("明日は晴れ", "アスワハレ"),
+                             [{"text": "明日", "reading": "アス"},
+                              {"text": "は", "reading": ""},
+                              {"text": "晴", "reading": "ハ"},
+                              {"text": "れ", "reading": ""}])
 
     def test_two_changed_words_do_not_gain_incorrect_ruby(self):
-        self.assertEqual(ruby_segments("明日は晴れ", "アスワセイレ"),
-                         [{"text": "明日は晴れ", "reading": ""}])
+        tokens = [{"surface_form": s, "pronunciation": p} for s, p in
+                  (("明日", "アシタ"), ("は", "ワ"), ("晴れ", "ハレ"))]
+        with patch.dict(sys.modules, soramimic_yomi=SimpleNamespace(get_tokens=lambda *_args, **_kw: tokens)):
+            self.assertEqual(ruby_segments("明日は晴れ", "アスワセイレ"),
+                             [{"text": "明日は晴れ", "reading": ""}])
 
     def test_inflected_word_only_marks_kanji(self):
         tokens = [{"surface_form": "歌っ", "pronunciation": "ウタッ"},

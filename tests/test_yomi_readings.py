@@ -33,6 +33,7 @@ class YomiReadingsTests(unittest.TestCase):
         self.module.start()
         self.addCleanup(self.module.stop)
 
+    @unittest.skipUnless(importlib.util.find_spec("MeCab"), "audio dependencies not installed")
     def test_alternate_word_segmentation_keeps_imayoru(self):
         candidates, = dictionary_candidates((LyricLine("二人今夜に駆け出してく"),))
         self.assertEqual(candidates[0], "フタリコンヤニカケダシテク")
