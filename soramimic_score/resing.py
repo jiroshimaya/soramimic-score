@@ -29,6 +29,16 @@ def _runtime() -> tuple[Path, Path, Path]:
     return root, python, leapsinger
 
 
+def available() -> bool:
+    """Report whether the external renderer can be offered in this service."""
+    try:
+        root, _, _ = _runtime()
+    except RuntimeError:
+        return False
+    acoustic = root / "checkpoints/leapsinger"
+    return acoustic.is_dir() and next(acoustic.rglob("3speaker_gan2d.pth"), None) is not None
+
+
 def _ust(document: ScoreDocument, excluded: frozenset[str]) -> bytes:
     chunks = ["[#VERSION]\nUST Version1.2\n", "[#SETTING]\nTempo=120\n"]
     cursor = index = 0

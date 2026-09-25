@@ -13,6 +13,7 @@ label{display:block;font-weight:700;margin:16px 0 8px}input,textarea,button{font
 input[type=file],textarea{width:100%;background:#101528;color:#fff;border:1px solid #596383;border-radius:9px;padding:12px}
 textarea{min-height:130px;resize:vertical}button,.link{display:inline-block;background:#79e2c4;color:#102323;border:0;border-radius:9px;padding:11px 17px;text-decoration:none;font-weight:800;cursor:pointer;margin:7px 7px 0 0}
 button:disabled{opacity:.45;cursor:wait}.secondary{background:#343d5c;color:#f5f5ff}
+#resing-audio[hidden],#resing-details[hidden]{display:none}
 #status{min-height:1.7em;color:#96e6d0}#result[hidden]{display:none}
 .upload{border:2px dashed #65768d;border-radius:14px;padding:28px 18px;text-align:center;background:#111a2d;transition:background .15s,border-color .15s}
 .upload.drag-over{background:#19394b;border-color:#79e2c4}.upload p{margin:8px 0}.upload button{margin:9px 4px 0}
@@ -48,8 +49,8 @@ audio{width:100%;margin:14px 0}canvas{width:100%;height:auto;border-radius:12px;
   <h2>ピアノロール・歌詞プレビュー</h2>
   <audio id="player" controls preload="metadata"></audio>
   <p class="details"><a id="result-link" href="#">この結果へのリンク</a>（約1時間有効）</p>
-  <div><button class="secondary" id="original-audio" type="button">元音源を再生</button><button class="secondary" id="resing-audio" type="button">PrettyPitchで歌い直す</button><span class="details" id="resing-status" role="status"></span></div>
-  <p class="details">歌い直しは推定した音符と歌詞から<a href="https://github.com/wavtechyukky/PrettyPitch">PrettyPitch</a>・<a href="https://www.canon-voice.com/voicebanks/">波音リツ</a>で合成し、分離した伴奏を重ねます。非商用の試験用モデルです。分離前の結果では歌声のみです。</p>
+  <div><button class="secondary" id="original-audio" type="button">元音源を再生</button><button class="secondary" id="resing-audio" type="button" hidden>PrettyPitchで歌い直す</button><span class="details" id="resing-status" role="status"></span></div>
+  <p class="details" id="resing-details" hidden>歌い直しは推定した音符と歌詞から<a href="https://github.com/wavtechyukky/PrettyPitch">PrettyPitch</a>・<a href="https://www.canon-voice.com/voicebanks/">波音リツ</a>で合成し、分離した伴奏を重ねます。非商用の試験用モデルです。分離前の結果では歌声のみです。</p>
   <div class="screen"><canvas id="roll" width="1280" height="480" aria-label="音符とカラオケ字幕のピアノロール"></canvas></div>
   <button class="secondary" id="record" type="button">プレビュー動画を保存</button>
   <h2>ダウンロード</h2><div class="downloads" id="downloads"></div>
@@ -87,6 +88,10 @@ player.addEventListener('error',()=>{
 });
 let selectedFile=null,micRecorder=null,micStream=null,recordTimer=null;
 const fmt=t=>`${Math.floor(t/60)}:${String(Math.floor(t%60)).padStart(2,'0')}.${String(Math.floor((t%1)*100)).padStart(2,'0')}`;
+json('/api/capabilities').then(c=>{
+  document.querySelector('#resing-audio').hidden=!c.resing;
+  document.querySelector('#resing-details').hidden=!c.resing;
+}).catch(()=>{});
 const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 async function json(url,options){const response=await fetch(url,options);const value=await response.json();if(!response.ok)throw Error(value.detail||'通信エラー');return value}
 function chooseFile(file){

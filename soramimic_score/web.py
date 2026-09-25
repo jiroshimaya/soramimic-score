@@ -207,6 +207,11 @@ def create_app(*, data_root: Path | None = None, analyzer=None, public: bool | N
     def health():
         return {"status": "ok"}
 
+    @app.get("/api/capabilities")
+    def capabilities():
+        from .resing import available
+        return {"resing": available()}
+
     @app.get("/", response_class=HTMLResponse)
     def home():
         return FileResponse(Path(__file__).with_name("score.html"), media_type="text/html")
@@ -357,6 +362,9 @@ def create_app(*, data_root: Path | None = None, analyzer=None, public: bool | N
     def start_resing(job: str):
         job = _job_id(job)
         _completed(root, db, job)
+        from .resing import available
+        if not available():
+            raise HTTPException(503, "このサーバーではPrettyPitchを利用できません")
         with sqlite3.connect(db) as conn:
             state, error, backend = conn.execute(
                 "SELECT synth_state,synth_error,synth_backend FROM jobs WHERE id=?",
