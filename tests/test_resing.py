@@ -45,6 +45,21 @@ class ResingTests(unittest.TestCase):
                 samples = struct.unpack("<2400h", wav.readframes(2400))
             self.assertLessEqual(max(samples), 31200)
 
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg is required")
+    def test_short_accompaniment_does_not_silently_leave_the_song_unbacked(self):
+        with tempfile.TemporaryDirectory() as directory:
+            voice = Path(directory) / "voice.wav"
+            backing = Path(directory) / "backing.wav"
+            for path, frames in ((voice, 48000), (backing, 2400)):
+                with wave.open(str(path), "wb") as wav:
+                    wav.setnchannels(1)
+                    wav.setsampwidth(2)
+                    wav.setframerate(24000)
+                    wav.writeframes(b"\x00\x00" * frames)
+            with self.assertRaisesRegex(ValueError, "伴奏音声が"):
+                mix_accompaniment(voice, backing)
+            self.assertTrue(voice.is_file())
+
     def test_score_has_original_timeline_and_mora_lyrics(self):
         score = _ust(ScoreDocumentTests().score_document(), frozenset()).decode("cp932")
         self.assertIn("Lyric=カ", score)

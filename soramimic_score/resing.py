@@ -8,6 +8,7 @@ import subprocess
 
 from .document import ScoreDocument
 from .japanese import kana_to_moras, mora_vowel
+from .media import probe_audio
 
 
 TICKS_PER_SECOND = 960  # 120 BPM, 480 ticks per beat
@@ -103,6 +104,8 @@ def synthesize(document: ScoreDocument, output: Path, *, duration_sec: float,
 
 def mix_accompaniment(vocal: Path, accompaniment: Path) -> None:
     """Overlay the separated instrumental on the synthesized voice."""
+    if probe_audio(accompaniment) + 0.5 < probe_audio(vocal):
+        raise ValueError("伴奏音声が歌い直し音声より短いため、合成を完了できません")
     mixed = vocal.with_name(vocal.stem + "-mixed.wav")
     try:
         subprocess.run([
