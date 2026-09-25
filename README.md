@@ -59,10 +59,10 @@ flowchart TD
 
 RAM と GPU メモリの最低容量は、音源の長さや使用するモデルによって変わるため、まだ検証できていません。
 
-### この PC での計測例
+### 解析時間とメモリ使用量の計測例
 
 Ubuntu 24.04、Ryzen 7 5700X（8 コア、16 スレッド）、RAM 64 GB、RTX 4060 Ti（GPU メモリ 16 GB）で、35 秒の歌唱音源を解析しました。
-Whisper large-v3、KanaWhisper、HTDemucs、ReazonSpeech、SheetSage2、MERT-v2-FullSong を使用し、全モデルをこの PC で実行しています。
+Whisper large-v3、KanaWhisper、HTDemucs、ReazonSpeech、SheetSage2、MERT-v2-FullSong を使用し、全モデルを上記の環境で実行しました。
 モデルは取得済みで、入力は WAV、正解歌詞の指定と歌い直しはありません。
 
 | 実行方法 | 解析時間 | プロセスの最大 RSS | GPU メモリの観測最大値 |
