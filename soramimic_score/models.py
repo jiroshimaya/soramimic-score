@@ -176,7 +176,8 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
                              local_files_only=config.local_files_only)
         try:
             segments, _ = model.transcribe(samples, language="ja", vad_filter=False,
-                                           condition_on_previous_text=False)
+                                           condition_on_previous_text=False,
+                                           temperature=0.0)
             lines = []
             for segment in segments:
                 onset = max(start, start + float(segment.start))
