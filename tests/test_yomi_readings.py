@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 
 from soramimic_score import LyricLine
 from soramimic_score.readings import (dictionary_candidates, dictionary_readings,
-                                     select_acoustic_reading)
+                                     select_acoustic_reading, token_reading_proposals)
 
 
 @dataclass
@@ -43,6 +43,18 @@ class YomiReadingsTests(unittest.TestCase):
             "vocals": "フタリイマヨルニカケダシテク",
         })
         self.assertEqual(choice.kana, "フタリイマヨルニカケダシテク")
+
+    @unittest.skipUnless(importlib.util.find_spec("MeCab"), "audio dependencies not installed")
+    def test_automatic_candidates_retain_imayoru_and_spoken_symbol(self):
+        self.yomi.return_value = [Candidate("フタリコンヤニカケダシテク")]
+        selected, = dictionary_readings(None, (LyricLine("二人今夜に駆け出してく"),),
+                                        automatic=True)
+        self.assertIn("フタリイマヨルニカケダシテク", selected.candidates)
+        self.yomi.side_effect = lambda text, nbest: [Candidate({
+            "歌&愛": "ウタアイ", "歌": "ウタ", "愛": "アイ", "&": "",
+        }[text])]
+        selected, = dictionary_readings(None, (LyricLine("歌&愛"),), automatic=True)
+        self.assertIn("ウタアンドアイ", selected.candidates)
 
     def test_yomi_first_with_unidic_alternatives_and_both_origins_on_duplicates(self):
         with patch("soramimic_score.readings.dictionary_candidates",
@@ -108,6 +120,13 @@ class YomiReadingsTests(unittest.TestCase):
 @unittest.skipUnless(importlib.util.find_spec("soramimic_yomi") and importlib.util.find_spec("MeCab"),
                      "audio dependencies not installed")
 class RealYomiTests(unittest.TestCase):
+    def test_local_dictionary_proposal_requires_kana_context(self):
+        surface = "二人今夜に駆け出してく"
+        default = "フタリコンヤニカケダシテク"
+        selected = "フタリイマヨルニカケダシテク"
+        self.assertIn(selected, token_reading_proposals(surface, default, (selected,)))
+        self.assertNotIn(selected, token_reading_proposals(surface, default, (default,)))
+
     def test_user_dictionary_numbers_and_latin_candidates(self):
         from soramimic_yomi import get_yomi, get_yomi_candidates
 

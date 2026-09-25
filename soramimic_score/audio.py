@@ -117,6 +117,8 @@ class AudioAdapters:
     repetition_evidence: RepetitionEvidence | None = None
     vocal_activity: VocalActivityEvidence | None = None
     repetition_evidence_mix: RepetitionEvidence | None = None
+    vocalization_reattacks: Callable[[str, float, float], Sequence[object]] | None = None
+    automatic_reading_selector: ReadingSelector | None = None
 
 
 class AudioPipelineError(RuntimeError):
@@ -394,6 +396,9 @@ def analyze_audio(
         if isinstance(lyrics, (str, bytes)):
             raise TypeError("lyrics must be a sequence of lines, not one string")
         _validate_lines(tuple(LyricLine(text) for text in lyrics), timed=False)
+    reading_selector = (adapters.automatic_reading_selector
+                        if lyrics is None and adapters.automatic_reading_selector is not None
+                        else adapters.reading_selector)
     if adapters.lyric_recognizer is None:
         raise AudioPipelineError("lyrics", "ASR-first analysis requires a recognizer")
     if on_progress:
@@ -506,7 +511,7 @@ def analyze_audio(
         def repeat_ctc(line: LyricLine) -> float:
             try:
                 selected = _validate_readings((line,), _run_adapter(
-                    "readings", adapters.reading_selector, path, (line,)))
+                    "readings", reading_selector, path, (line,)))
                 aligned = _validate_moras(selected, _run_adapter(
                     "mora alignment", adapters.mora_aligner, path, (line,), selected))
             except Exception:
@@ -679,12 +684,12 @@ def analyze_audio(
                 # local retry with the original line on the same vocal audio.
                 try:
                     source_readings = _validate_readings((source,), _run_adapter(
-                        "readings", adapters.reading_selector, path, (source,)))
+                        "readings", reading_selector, path, (source,)))
                     source_moras = _validate_moras(source_readings, _run_adapter(
                         "mora alignment", adapters.mora_aligner,
                         path, (source,), source_readings))
                     candidate_readings = _validate_readings(candidates, _run_adapter(
-                        "readings", adapters.reading_selector, path, candidates))
+                        "readings", reading_selector, path, candidates))
                     candidate_moras = _validate_moras(candidate_readings, _run_adapter(
                         "mora alignment", adapters.mora_aligner,
                         path, candidates, candidate_readings))
@@ -751,7 +756,7 @@ def analyze_audio(
     if on_progress:
         on_progress("歌詞の読みを確認しています")
     readings = _validate_readings(
-        lines, _run_adapter("readings", adapters.reading_selector, path, lines),
+        lines, _run_adapter("readings", reading_selector, path, lines),
     )
     if overlay is not None:
         for group, reading in zip(overlay["groups"], readings, strict=True):
@@ -835,7 +840,7 @@ def analyze_audio(
                                     and has_melodic_support(candidate, notes))
             lines = _validate_lines(sorted(retained, key=lambda item: item.start_sec), timed=True)
             readings = _validate_readings(
-                lines, _run_adapter("readings", adapters.reading_selector, path, lines))
+                lines, _run_adapter("readings", reading_selector, path, lines))
             lines, readings, moras = align_retained(lines, readings)
     if lyrics is None and adapters.lyric_recoverer is not None:
         # Stage 3 owns note assignment. Probe once before retrying truly unowned
@@ -891,7 +896,7 @@ def analyze_audio(
                         continue
                     try:
                         selected = _validate_readings(candidates, _run_adapter(
-                            "readings", adapters.reading_selector, path, candidates))
+                            "readings", reading_selector, path, candidates))
                         aligned = _validate_moras(selected, _run_adapter(
                             "mora alignment", adapters.mora_aligner,
                             path, candidates, selected))
@@ -937,7 +942,7 @@ def analyze_audio(
                                     continue
                                 try:
                                     selected = _validate_readings((expanded,), _run_adapter(
-                                        "readings", adapters.reading_selector,
+                                        "readings", reading_selector,
                                         path, (expanded,)))
                                     aligned = _validate_moras(selected, _run_adapter(
                                         "mora alignment", adapters.mora_aligner,
@@ -969,7 +974,7 @@ def analyze_audio(
                                                        for item in exact_vowels), start, end)
                             try:
                                 selected = _validate_readings((vowel_line,), _run_adapter(
-                                    "readings", adapters.reading_selector,
+                                    "readings", reading_selector,
                                     path, (vowel_line,)))
                                 aligned = _validate_moras(selected, _run_adapter(
                                     "mora alignment", adapters.mora_aligner,
@@ -992,7 +997,7 @@ def analyze_audio(
                 lines = _validate_lines(sorted((*lines, *additions),
                                                key=lambda item: item.start_sec), timed=True)
                 readings = _validate_readings(lines, _run_adapter(
-                    "readings", adapters.reading_selector, path, lines))
+                    "readings", reading_selector, path, lines))
                 lines, readings, moras = align_retained(lines, readings)
     if on_progress:
         on_progress("楽譜データを組み立てています")
@@ -1016,9 +1021,21 @@ def analyze_audio(
         )
         line_windows = {f"u{index}": window
                         for index, window in enumerate(snapped)}
+    reattacks = {}
+    if lyrics is None and line_windows is not None and adapters.vocalization_reattacks:
+        for index, reading in enumerate(readings):
+            components = kana_to_moras(reading.kana)
+            if (len(components) < 2 or len(set(components)) != 1
+                    or components[0] in {"ン", "ッ", "ー"}):
+                continue
+            start, end = line_windows[f"u{index}"]
+            events = tuple(adapters.vocalization_reattacks(components[0], start, end))
+            if len(events) >= len(components):
+                reattacks[f"u{index}"] = events
     result = compile_score(
         observations,
         config=NoteRunConfig(whisper_boundary_cost_per_sec2=.1),
         line_windows_by_utterance=line_windows,
+        vocalization_reattacks_by_utterance=reattacks if reattacks else None,
     )
     return attach_lyric_surface(result, overlay) if overlay is not None else result

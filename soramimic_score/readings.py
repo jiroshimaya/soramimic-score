@@ -3,16 +3,103 @@ from __future__ import annotations
 
 import csv
 from dataclasses import replace
+from functools import lru_cache
 from itertools import islice, product
 import math
+import re
 from threading import Lock
 import unicodedata
 
-from .audio import ReadingSelection
-from .japanese import _RUBY, kana_to_moras, katakana, mora_distance, mora_vowel
+from .audio import LyricLine, ReadingSelection
+from .japanese import _RUBY, kana_to_moras, katakana, mora_vowel
 
 
 _YOMI_LOCK = Lock()
+_LATIN_OR_DIGIT = re.compile(r"[0-9０-９A-Za-zＡ-Ｚａ-ｚ]")
+_SPOKEN_SYMBOL = re.compile(r"[&+#%@=×÷＆＋＃％＠＝]")
+_SYMBOL_READING = {"&": "アンド", "+": "プラス", "#": "シャープ",
+                   "%": "パーセント", "@": "アット", "=": "イコール",
+                   "×": "カケル", "÷": "ワル"}
+
+
+def _vowels(reading):
+    """Use Video's vowel-sequence guard for automatic readings."""
+    result = []
+    for mora in kana_to_moras(_comparison_kana(reading)):
+        if mora == "ー":
+            continue
+        try:
+            vowel = mora_vowel(mora)
+        except ValueError:
+            continue
+        if vowel in "aiueo":
+            result.append(vowel)
+    return tuple(result)
+
+
+def _automatic_candidates(text, candidates):
+    """Keep bounded, vowel-distinct automatic readings, as Video does."""
+    if not candidates:
+        return ()
+    default = candidates[0]
+    yomi = [candidate for candidate in candidates
+            if candidate[1] == "soramimic-yomi"]
+    diverse_yomi = yomi[:1]
+    seen_mora_counts = {len(kana_to_moras(yomi[0][0]))} if yomi else set()
+    for candidate in yomi[1:]:
+        count = len(kana_to_moras(candidate[0]))
+        if count not in seen_mora_counts and len(diverse_yomi) < 8:
+            diverse_yomi.append(candidate)
+            seen_mora_counts.add(count)
+    for candidate in yomi[1:]:
+        if len(diverse_yomi) >= 8:
+            break
+        if candidate not in diverse_yomi:
+            diverse_yomi.append(candidate)
+    unidic = [candidate for candidate in candidates
+              if candidate[1] == "unidic-lite"][:2]
+    linguistic = tuple(diverse_yomi if _LATIN_OR_DIGIT.search(text)
+                       else [*diverse_yomi, *unidic])
+    if not linguistic:
+        linguistic = candidates[:1]
+    selected = [default]
+    default_vowels = _vowels(default[0])
+    for candidate in linguistic[1:]:
+        if _vowels(candidate[0]) != default_vowels:
+            selected.append(candidate)
+    symbols = list(_SPOKEN_SYMBOL.finditer(text))
+    def plain_reading(surface):
+        if not surface:
+            return ""
+        try:
+            return dictionary_readings(None, (LyricLine(surface),))[0].kana
+        except ValueError:
+            return ""
+
+    for subset in ([{index} for index in range(len(symbols))]
+                   + ([set(range(len(symbols)))] if len(symbols) > 1 else [])):
+        pieces = []
+        cursor = 0
+        for index, match in enumerate(symbols):
+            if match.start() > cursor:
+                pieces.append(plain_reading(text[cursor:match.start()]))
+            surface = unicodedata.normalize("NFKC", match.group())
+            pieces.append(_SYMBOL_READING.get(surface, "") if index in subset else
+                          plain_reading(match.group()))
+            cursor = match.end()
+        if cursor < len(text):
+            pieces.append(plain_reading(text[cursor:]))
+        alternate = "".join(pieces)
+        if alternate:
+            selected.append((alternate, "spoken-symbol"))
+    unique = []
+    seen = set()
+    for candidate in selected:
+        key = _comparison_kana(candidate[0])
+        if key and key not in seen:
+            seen.add(key)
+            unique.append(candidate)
+    return tuple(unique)
 
 
 def _node_reading(node):
@@ -61,7 +148,7 @@ def dictionary_candidates(lines):
     return tuple(output)
 
 
-def dictionary_readings(_path, lines):
+def dictionary_readings(_path, lines, *, automatic=False):
     """Use Yomi first, supplement with UniDic, and retain each candidate's origin.
 
     Import failures and engine errors propagate instead of silently disabling
@@ -79,7 +166,8 @@ def dictionary_readings(_path, lines):
                 plain = line.text[cursor:end]
                 if any(not c.isspace() and unicodedata.category(c)[0] not in "PZC"
                        for c in plain):
-                    parts.append(dictionary_readings(_path, (replace(line, text=plain),))[0].candidates)
+                    parts.append(dictionary_readings(_path, (replace(line, text=plain),),
+                                                     automatic=automatic)[0].candidates)
                 if match is not None:
                     kana = katakana(match[2])
                     if not kana or "".join(kana_to_moras(kana)) != kana:
@@ -117,35 +205,133 @@ def dictionary_readings(_path, lines):
         if not provenance:
             raise ValueError("Neither soramimic-yomi nor UniDic could pronounce the lyric line")
         candidates = tuple(provenance)
+        if automatic:
+            selected = _automatic_candidates(
+                line.text,
+                tuple((candidate, provenance[candidate]["sources"][0])
+                      for candidate in candidates),
+            )
+            candidates = tuple(candidate for candidate, _source in selected)
+            for candidate, candidate_source in selected:
+                provenance.setdefault(candidate, {"kana": candidate,
+                                                  "sources": [candidate_source]})
         source = provenance[candidates[0]]["sources"][0]
         output.append(ReadingSelection(candidates[0], source, 1.0, candidates, {
             "reason": "dictionary", "confidence_available": False,
-            "candidate_provenance": list(provenance.values()),
+            "candidate_provenance": [provenance[candidate] for candidate in candidates],
             "yomi_status": yomi_status, "unidic_status": unidic_status,
         }))
     return tuple(output)
 
 
-def _comparison_moras(kana):
-    output = []
-    vowel = None
-    for mora in kana_to_moras(kana):
-        if mora == "ー" and vowel is not None and vowel in "aiueo":
-            mora = dict(zip("aiueo", "アイウエオ"))[vowel]
-        mora = {"ヲ": "オ", "ヂ": "ジ", "ヅ": "ズ"}.get(mora, mora)
-        vowel = mora_vowel(mora, vowel)
-        output.append(mora)
-    return tuple(output)
+def _comparison_kana(text, *, evidence=False):
+    """Apply Video's kana comparison normalization to a closed reading."""
+    kana = "".join(re.findall(r"[ァ-ヶー]+", katakana(text))).replace("ヲ", "オ")
+    small_vowels = {"ァ": "ア", "ィ": "イ", "ゥ": "ウ", "ェ": "エ",
+                    "ォ": "オ", "ヮ": "ワ"}
+    small_moras = {**small_vowels, "ャ": "ヤ", "ュ": "ユ", "ョ": "ヨ"}
+    def char_vowel(char):
+        try:
+            return mora_vowel(small_moras.get(char, char))
+        except ValueError:
+            return None
+
+    def open_small(value):
+        output = []
+        previous_vowel = None
+        for char in value:
+            large = small_vowels.get(char)
+            if large is not None and previous_vowel in (None, char_vowel(large)):
+                char = large
+            if char != "ー":
+                previous_vowel = char_vowel(char)
+            if char != "ー" or not output or output[-1] != "ー":
+                output.append(char)
+        return "".join(output)
+
+    def normalize_long(value):
+        output = []
+        for char in value:
+            prior = char_vowel(output[-1]) if output and output[-1] != "ー" else None
+            if (prior is not None and char in "アイウエオ"
+                    and ((char == "ウ" and prior in {"o", "u"})
+                         or (char == "イ" and prior in {"e", "i"})
+                         or char_vowel(char) == prior)):
+                char = "ー"
+            output.append(char)
+        return "".join(output)
+
+    return (open_small(normalize_long(kana)) if evidence else
+            open_small(normalize_long(open_small(kana))))
+
+
+def token_reading_proposals(surface_text, default_reading, evidence=None):
+    """Video-style single-token alternatives with two-mora local context."""
+    from soramimic_yomi import get_tokens
+
+    with _YOMI_LOCK:
+        tokens = [(token.get("surface_form", ""),
+                   katakana(token.get("pronunciation") or token.get("reading") or ""))
+                  for token in get_tokens(surface_text)]
+    pieces = [reading for surface, reading in tokens if surface]
+    tokens = [(surface, reading) for surface, reading in tokens if surface]
+    if _comparison_kana("".join(pieces)) != _comparison_kana(default_reading):
+        return ()
+    default_vowels = _vowels(default_reading)
+    keys = (tuple("".join(_kana_distance().preprocess_func(_comparison_kana(text, evidence=True)))
+                  for text in evidence) if evidence is not None else None)
+    proposals = []
+    seen = {_comparison_kana(default_reading)}
+    for index, (surface, reading) in enumerate(tokens):
+        if not re.search(r"[\u3400-\u9fff々〆ヵヶ]", surface) or not reading:
+            continue
+        left = _kana_distance().preprocess_func(
+            _comparison_kana("".join(pieces[:index])))[-2:]
+        right = _kana_distance().preprocess_func(
+            _comparison_kana("".join(pieces[index + 1:])) )[:2]
+        if len(left) + len(right) < 2:
+            continue
+        try:
+            alternatives = dictionary_readings(None, (LyricLine(surface),))[0].candidates
+        except ValueError:
+            continue
+        for alternative in alternatives:
+            candidate = "".join((*pieces[:index], alternative, *pieces[index + 1:]))
+            key = _comparison_kana(candidate)
+            if key in seen or _vowels(candidate) == default_vowels:
+                continue
+            seen.add(key)
+            local = "".join((*left, *_kana_distance().preprocess_func(
+                _comparison_kana(alternative)), *right))
+            full_key = "".join(_kana_distance().preprocess_func(key))
+            if keys is None or any(local in text or full_key in text for text in keys):
+                proposals.append(candidate)
+    return tuple(proposals)
+
+
+@lru_cache(maxsize=1)
+def _kana_distance():
+    from kanasim import create_kana_distance_calculator
+    return create_kana_distance_calculator(symmetric=True, normalize=True)
 
 
 def _substring_distance(candidate, evidence):
-    """Match the entire candidate to a context substring; do not normalize by length."""
+    """Match with Video's Kanasim costs and free evidence prefix/suffix."""
+    distance = _kana_distance()
+    candidate = distance.preprocess_func(re.sub("ー+", "ー", candidate))
+    evidence = distance.preprocess_func(re.sub("ー+", "ー", evidence))
     previous = [0.0] * (len(evidence) + 1)
     for expected in candidate:
-        current = [previous[0] + 1.0]
+        delete = (distance.delete_cost_func(expected) if distance.delete_cost_func
+                  else distance.delete_cost)
+        current = [previous[0] + delete]
         for index, observed in enumerate(evidence, 1):
-            current.append(min(previous[index] + 1.0, current[-1] + 1.0,
-                               previous[index - 1] + mora_distance(expected, observed) / 4))
+            insert = (distance.insert_cost_func(observed) if distance.insert_cost_func
+                      else distance.insert_cost)
+            replace = (distance.replace_cost_func(expected, observed)
+                       if distance.replace_cost_func else distance.replace_cost)
+            current.append(min(previous[index] + delete, current[-1] + insert,
+                               previous[index - 1] + replace))
         previous = current
     return min(previous)
 
@@ -159,11 +345,11 @@ def select_acoustic_reading(candidates, transcripts):
     if not candidates:
         raise ValueError("At least one dictionary candidate is required")
     detail = {"transcripts": dict(transcripts), "confidence_available": False,
-              "distance": "phonetic-mora-substring", "reason": "no-acoustic-evidence"}
+              "distance": "kanasim-weighted-substring-0.0.11", "reason": "no-acoustic-evidence"}
     evidence = {}
     for view, text in transcripts.items():
         try:
-            moras = _comparison_moras(text)
+            moras = _comparison_kana(text, evidence=True)
         except ValueError:
             continue
         if moras:
@@ -171,7 +357,7 @@ def select_acoustic_reading(candidates, transcripts):
     distances = []
     for candidate in candidates:
         try:
-            moras = _comparison_moras(candidate)
+            moras = _comparison_kana(candidate)
             row = {view: _substring_distance(moras, text) for view, text in evidence.items()}
         except ValueError:
             row = {view: None for view in evidence}
@@ -190,7 +376,7 @@ def select_acoustic_reading(candidates, transcripts):
             gains = [distances[0][view] - distances[best][view] for view in evidence]
             if min(gains) < -1e-9:
                 detail["reason"] = "conflicting-evidence"
-            elif sum(gains) >= .25:
+            elif sum(gains) >= .25 or any(value == 0. for value in distances[best].values()):
                 selected = best
                 detail["reason"] = "acoustic-agreement"
             else:
@@ -210,3 +396,39 @@ def acoustic_windows(start, end, duration):
         result.append((cursor, last))
         cursor = last
     return tuple(result)
+
+
+def grouped_acoustic_windows(line_windows, indices, duration):
+    """Share bounded KanaWhisper context across nearby lines, as Video does."""
+    windows = []
+    assignments = {}
+    group = []
+
+    def publish():
+        if not group:
+            return
+        first = line_windows[group[0]][0]
+        last = line_windows[group[-1]][1]
+        if last - first > 21:
+            for index in group:
+                chunks = acoustic_windows(*line_windows[index], duration)
+                assignments[index] = tuple(range(len(windows), len(windows) + len(chunks)))
+                windows.extend(chunks)
+            return
+        window_index = len(windows)
+        windows.append((max(0., first - 1.5), min(duration, last + 1.5)))
+        for index in group:
+            assignments[index] = (window_index,)
+
+    for index in indices:
+        start, end = line_windows[index]
+        if not math.isfinite(start + end) or end <= start or start < 0:
+            raise ValueError("Invalid acoustic reading window")
+        if group and end - line_windows[group[0]][0] > 9:
+            publish()
+            group = []
+        group.append(index)
+    publish()
+    if len(windows) > 256:
+        raise ValueError("KanaWhisper context count exceeds 256")
+    return tuple(windows), assignments

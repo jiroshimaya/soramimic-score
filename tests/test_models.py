@@ -287,7 +287,7 @@ class ModelTests(unittest.TestCase):
                 self.assertEqual(selected[0].kana, "ア")
                 final = adapters.mora_aligner(path, (LyricLine("ああ"),), selected)
                 self.assertEqual(len(final), 1)
-                self.assertEqual(kana.call_args.args[1], [(0.0, 1.0)])
+                self.assertEqual(kana.call_args.args[1], ((0.0, 1.0),))
                 self.assertEqual(model_factory.call_count, 2)
 
             # Forced alignment uses the separated stem on the original clock.
