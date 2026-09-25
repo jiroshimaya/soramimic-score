@@ -136,7 +136,9 @@ class ScoreWebTests(unittest.TestCase):
         def synthesize(_document, output, **kwargs):
             output.write_bytes(wav_bytes())
             kwargs["on_progress"](1, 1)
-        with patch("soramimic_score.resing.synthesize", side_effect=synthesize):
+        with patch("soramimic_score.resing.available", return_value=True), patch(
+            "soramimic_score.resing.synthesize", side_effect=synthesize
+        ):
             self.assertEqual(self.client.post(f"/api/jobs/{job}/resing").status_code, 200)
             for _ in range(100):
                 state = self.client.get(f"/api/jobs/{job}/resing").json()["state"]
@@ -145,6 +147,37 @@ class ScoreWebTests(unittest.TestCase):
                 time.sleep(.02)
             self.assertEqual(state, "done")
             self.assertTrue(self.client.get(f"/api/jobs/{job}/resing/audio").content.startswith(b"RIFF"))
+            with sqlite3.connect(Path(self.temporary.name) / "jobs.sqlite3") as connection:
+                connection.execute("UPDATE jobs SET synth_backend=NULL WHERE id=?", (job,))
+            self.assertIsNone(self.client.get(f"/api/jobs/{job}/resing").json()["state"])
+            self.assertEqual(self.client.get(f"/api/jobs/{job}/resing/audio").status_code, 409)
+            self.assertEqual(self.client.post(f"/api/jobs/{job}/resing").status_code, 200)
+            for _ in range(100):
+                if self.client.get(f"/api/jobs/{job}/resing").json()["state"] == "done":
+                    break
+                time.sleep(.02)
+            self.assertEqual(self.client.get(f"/api/jobs/{job}/resing").json()["state"], "done")
+            with sqlite3.connect(Path(self.temporary.name) / "jobs.sqlite3") as connection:
+                connection.execute("UPDATE jobs SET synth_state='failed', synth_error='歌唱合成に失敗しました' "
+                                   "WHERE id=?", (job,))
+            self.assertEqual(self.client.post(f"/api/jobs/{job}/resing").json()["state"], "queued")
+            for _ in range(100):
+                if self.client.get(f"/api/jobs/{job}/resing").json()["state"] == "done":
+                    break
+                time.sleep(.02)
+            self.assertEqual(self.client.get(f"/api/jobs/{job}/resing").json()["state"], "done")
+
+    def test_resinging_is_unavailable_without_renderer(self):
+        with patch.dict("os.environ", {"SORAMIMIC_SCORE_SHEETSAGE_MODEL": "a",
+                                    "SORAMIMIC_SCORE_SHEETSAGE_BASE": "b"}):
+            job = self.submit().json()["id"]
+            for _ in range(100):
+                if self.client.get(f"/api/jobs/{job}").json()["state"] == "done":
+                    break
+                time.sleep(.02)
+        with patch("soramimic_score.resing.available", return_value=False):
+            self.assertFalse(self.client.get("/api/capabilities").json()["resing"])
+            self.assertEqual(self.client.post(f"/api/jobs/{job}/resing").status_code, 503)
 
     def test_guidelines_explain_retention(self):
         response = self.client.get("/guidelines")

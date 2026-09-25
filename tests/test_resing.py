@@ -1,4 +1,3 @@
-import io
 import shutil
 import struct
 import tempfile
@@ -7,7 +6,7 @@ import wave
 from pathlib import Path
 from unittest.mock import patch
 
-from soramimic_score.resing import _score_for_slots, mix_accompaniment, synthesize
+from soramimic_score.resing import _ust, mix_accompaniment, synthesize
 from tests.test_document import ScoreDocumentTests
 
 
@@ -46,34 +45,60 @@ class ResingTests(unittest.TestCase):
                 samples = struct.unpack("<2400h", wav.readframes(2400))
             self.assertLessEqual(max(samples), 31200)
 
-    def test_score_has_lead_rest_and_mora_lyrics(self):
-        slots = ScoreDocumentTests().score_document().score.synthesis_plan
-        score = _score_for_slots(list(slots), 0)
-        self.assertIsNone(score["notes"][0]["key"])
-        self.assertTrue(all(note["frame_length"] >= 3 for note in score["notes"]))
+    @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "FFmpeg is required")
+    def test_short_accompaniment_does_not_silently_leave_the_song_unbacked(self):
+        with tempfile.TemporaryDirectory() as directory:
+            voice = Path(directory) / "voice.wav"
+            backing = Path(directory) / "backing.wav"
+            for path, frames in ((voice, 48000), (backing, 2400)):
+                with wave.open(str(path), "wb") as wav:
+                    wav.setnchannels(1)
+                    wav.setsampwidth(2)
+                    wav.setframerate(24000)
+                    wav.writeframes(b"\x00\x00" * frames)
+            with self.assertRaisesRegex(ValueError, "伴奏音声が"):
+                mix_accompaniment(voice, backing)
+            self.assertTrue(voice.is_file())
 
-    def test_on_demand_audio_uses_original_timeline(self):
+    def test_score_has_original_timeline_and_mora_lyrics(self):
+        score = _ust(ScoreDocumentTests().score_document(), frozenset()).decode("cp932")
+        self.assertIn("Lyric=カ", score)
+        self.assertIn("Length=384", score)
+        self.assertIn("NoteNum=", score)
+        self.assertIn("[#TRACKEND]", score)
+
+    def test_on_demand_audio_uses_configured_prettypitch(self):
         document = ScoreDocumentTests().score_document()
         calls = []
-
-        def post(_base, endpoint, body):
-            calls.append(endpoint)
-            if endpoint == "sing_frame_audio_query":
-                return b"{}"
-            out = io.BytesIO()
-            with wave.open(out, "wb") as wav:
-                wav.setnchannels(1)
-                wav.setsampwidth(2)
-                wav.setframerate(24000)
-                wav.writeframes(b"\x01\x00" * 2400)
-            return out.getvalue()
-
-        with tempfile.TemporaryDirectory() as directory, patch(
-            "soramimic_score.resing._post", side_effect=post
-        ):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "runtime"
+            for relative in ("svs/render.py", "dict/ja.mora", "checkpoints/f0_3singer.pt",
+                             "checkpoints/cons_dur_3singer.pt", "checkpoints/nhv_v3_2_1.onnx",
+                             "../LeapSinger/infer.py", ".venv/bin/python"):
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("ア a A\n" if relative == "dict/ja.mora" else "")
             output = Path(directory) / "resung.wav"
-            synthesize(document, output, engine_url="http://127.0.0.1:50021", duration_sec=2)
+            def run(command, **kwargs):
+                calls.append(command)
+                if "svs.render" in command:
+                    with wave.open(str(root.parent / "prettypitch/vocal.wav"), "wb") as wav:
+                        wav.setnchannels(1)
+                        wav.setsampwidth(2)
+                        wav.setframerate(24000)
+                        wav.writeframes(b"\x01\x00" * 2400)
+                else:
+                    with wave.open(str(output), "wb") as wav:
+                        wav.setnchannels(1)
+                        wav.setsampwidth(2)
+                        wav.setframerate(24000)
+                        wav.writeframes(b"\x01\x00" * 48000)
+                return type("Result", (), {"returncode": 0, "stderr": ""})()
+            with patch.dict("os.environ", {"PRETTYPITCH_ROOT": str(root)}), patch(
+                "soramimic_score.resing.subprocess.run", side_effect=run
+            ):
+                synthesize(document, output, duration_sec=2)
             with wave.open(str(output)) as wav:
                 self.assertEqual(wav.getnframes(), 48000)
                 self.assertIn(b"\x01\x00", wav.readframes(wav.getnframes()))
-        self.assertEqual(calls, ["sing_frame_audio_query", "frame_synthesis"])
+        self.assertEqual(calls[0][1:3], ["-m", "svs.render"])

@@ -81,9 +81,11 @@ MP3・M4A・WAV・FLAC・Ogg・WebMなどの音声を選択、ドロップ、ま
 保存できます。Score JSON、標準MIDI、MusicXML、SRT、LRCをダウンロードできます。
 入力歌詞を指定した場合、対応が確かな行の字幕にはその表記を使用します。
 時刻が音声から得られなかったモーラは音符区間からの推定値です。
-「VOICEVOXで歌い直す」を押すと、利用者が要求したジョブだけを波音リツの歌声で合成し、
-元音源の時間軸に合わせて再生します。伴奏は含みません。VOICEVOX ENGINEが利用できる場合は
-`SORAMIMIC_SCORE_VOICEVOX_URL`で接続先を指定できます（既定はローカルの50021番ポート）。
+「PrettyPitchで歌い直す」を押すと、利用者が要求したジョブだけを波音リツの歌声で合成し、
+元音源の時間軸に合わせ、分離した伴奏と重ねて再生します。
+外部のPrettyPitch、LeapSinger、各モデルが必要です。実行環境は `PRETTYPITCH_ROOT`、
+`PRETTYPITCH_PYTHON`、`PRETTYPITCH_LEAPSINGER_ROOT`、`PRETTYPITCH_DEVICE` で指定します。
+歌声モデルとボコーダの利用条件に従ってください。
 自動認識のクレジット風の行は、重なる歌唱音符があればその区間を短く再認識し、
 歌詞が得られなければ除外します。正解歌詞に書かれた行は保持します。
 

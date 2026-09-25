@@ -1,111 +1,111 @@
-"""Optional, on-demand VOICEVOX singing preview from a Score document."""
+"""On-demand PrettyPitch singing preview from a Score document."""
 
 from __future__ import annotations
 
-from collections import defaultdict
-from io import BytesIO
-import json
+import os
 from pathlib import Path
 import subprocess
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
-import wave
 
 from .document import ScoreDocument
 from .japanese import kana_to_moras, mora_vowel
+from .media import probe_audio
 
 
-FRAME_RATE = 93.75
-STYLE_ID = 6000  # VOICEVOX:波音リツ (sing)
+TICKS_PER_SECOND = 960  # 120 BPM, 480 ticks per beat
+MORA_ADDITIONS = ("リュ ry U", "リョ ry O", "ヴィ v I")
 
 
-def _post(base: str, endpoint: str, body: dict) -> bytes:
-    url = f"{base.rstrip('/')}/{endpoint}?{urlencode({'speaker': STYLE_ID})}"
-    request = Request(url, data=json.dumps(body, ensure_ascii=False).encode(),
-                      headers={"Content-Type": "application/json"}, method="POST")
-    with urlopen(request, timeout=300) as response:
-        return response.read()
+def _runtime() -> tuple[Path, Path, Path]:
+    root_value = os.environ.get("PRETTYPITCH_ROOT")
+    if not root_value:
+        raise RuntimeError("PRETTYPITCH_ROOT が設定されていません")
+    root = Path(root_value).expanduser().resolve()
+    python = Path(os.environ.get("PRETTYPITCH_PYTHON", str(root / ".venv/bin/python"))).expanduser().absolute()
+    leapsinger = Path(os.environ.get("PRETTYPITCH_LEAPSINGER_ROOT", str(root.parent / "LeapSinger"))).expanduser().resolve()
+    for required in (root / "svs/render.py", root / "dict/ja.mora",
+                     root / "checkpoints/f0_3singer.pt", root / "checkpoints/cons_dur_3singer.pt",
+                     root / "checkpoints/nhv_v3_2_1.onnx", leapsinger / "infer.py", python):
+        if not required.is_file():
+            raise RuntimeError(f"PrettyPitch の必要ファイルがありません: {required}")
+    return root, python, leapsinger
 
 
-def _score_for_slots(slots: list, offset: int) -> dict:
-    cursor = 0
-    notes = []
+def available() -> bool:
+    """Report whether the external renderer can be offered in this service."""
+    try:
+        root, _, _ = _runtime()
+    except RuntimeError:
+        return False
+    acoustic = root / "checkpoints/leapsinger"
+    return acoustic.is_dir() and next(acoustic.rglob("3speaker_gan2d.pth"), None) is not None
+
+
+def _ust(document: ScoreDocument, excluded: frozenset[str]) -> bytes:
+    chunks = ["[#VERSION]\nUST Version1.2\n", "[#SETTING]\nTempo=120\n"]
+    cursor = index = 0
     previous_vowel = "ア"
-    for slot in slots:
-        start = max(cursor, round(slot.start_sec * FRAME_RATE) - offset)
-        if cursor == 0 and start < 3:
-            start = 3
-        if 0 < start - cursor < 3:
-            start = cursor
-        end = max(start + 3, round(slot.end_sec * FRAME_RATE) - offset)
-        if start > cursor:
-            notes.append({"key": None, "frame_length": start - cursor, "lyric": ""})
-        moras = list(kana_to_moras(slot.kana))
-        lyrics = []
-        for mora in moras:
-            if mora == "ー":
-                lyrics.append(previous_vowel)
-            else:
-                lyrics.append(mora)
-                previous_vowel = {"a": "ア", "i": "イ", "u": "ウ", "e": "エ", "o": "オ"}.get(
-                    mora_vowel(mora), previous_vowel)
-        lyrics = lyrics or [previous_vowel]
-        # Very short notes cannot hold multiple VOICEVOX phonemes.
-        count = min(len(lyrics), max(1, (end - start) // 4))
-        for part, lyric in enumerate(lyrics[:count]):
-            a = start + (end - start) * part // count
-            b = start + (end - start) * (part + 1) // count
-            notes.append({"key": slot.midi_pitch, "frame_length": b - a,
-                          "lyric": lyric})
-        cursor = end
-    notes.append({"key": None, "frame_length": 24, "lyric": ""})
-    return {"notes": notes}
-
-
-def synthesize(document: ScoreDocument, output: Path, *, engine_url: str,
-               duration_sec: float, on_progress=None,
-               excluded_utterance_ids: frozenset[str] = frozenset()) -> None:
-    """Synthesize short utterance chunks and place them on the original clock."""
-    by_line = defaultdict(list)
-    for slot in document.score.synthesis_plan:
-        if slot.utterance_id in excluded_utterance_ids:
+    for slot in sorted(document.score.synthesis_plan, key=lambda item: (item.start_sec, item.id)):
+        if slot.utterance_id in excluded:
             continue
-        by_line[slot.utterance_id].append(slot)
-    groups = sorted((sorted(slots, key=lambda slot: slot.start_sec)
-                     for slots in by_line.values()), key=lambda slots: slots[0].start_sec)
-    if not groups:
+        start = max(cursor, round(slot.start_sec * TICKS_PER_SECOND))
+        end = max(start + 1, round(slot.end_sec * TICKS_PER_SECOND))
+        if start > cursor:
+            chunks.append(f"[#{index:04d}]\nLength={start - cursor}\nLyric=R\nNoteNum=60\n")
+            index += 1
+        moras = kana_to_moras(slot.kana)
+        lyric = "".join(moras) or previous_vowel
+        if lyric == "ー":
+            lyric = previous_vowel
+        else:
+            previous_vowel = {"a": "ア", "i": "イ", "u": "ウ", "e": "エ", "o": "オ"}.get(
+                mora_vowel(moras[-1]) if moras else None, previous_vowel)
+        chunks.append(f"[#{index:04d}]\nLength={end - start}\nLyric={lyric}\nNoteNum={slot.midi_pitch}\n")
+        cursor = end
+        index += 1
+    if not index:
         raise ValueError("歌唱音符がありません")
-    sample_rate = channels = width = None
-    pcm = None
-    for index, slots in enumerate(groups):
-        # Leave a short leading rest for the VOICEVOX singing API.
-        offset = max(0, round(slots[0].start_sec * FRAME_RATE) - 28)
-        query = json.loads(_post(engine_url, "sing_frame_audio_query",
-                                 _score_for_slots(slots, offset)))
-        chunk = _post(engine_url, "frame_synthesis", query)
-        with wave.open(BytesIO(chunk), "rb") as wav:
-            fmt = (wav.getframerate(), wav.getnchannels(), wav.getsampwidth())
-            if pcm is None:
-                sample_rate, channels, width = fmt
-                pcm = bytearray(round(duration_sec * sample_rate) * channels * width)
-            elif fmt != (sample_rate, channels, width):
-                raise ValueError("VOICEVOX音声形式が途中で変わりました")
-            samples = wav.readframes(wav.getnframes())
-        start_byte = round(offset / FRAME_RATE * sample_rate) * channels * width
-        end_byte = min(len(pcm), start_byte + len(samples))
-        if end_byte > start_byte:
-            pcm[start_byte:end_byte] = samples[:end_byte - start_byte]
-        if on_progress:
-            on_progress(index + 1, len(groups))
-    with wave.open(str(output), "wb") as wav:
-        wav.setnchannels(channels)
-        wav.setsampwidth(width)
-        wav.setframerate(sample_rate)
-        wav.writeframes(pcm)
+    chunks.append("[#TRACKEND]\n")
+    return "".join(chunks).encode("cp932")
+
+
+def synthesize(document: ScoreDocument, output: Path, *, duration_sec: float,
+               on_progress=None, excluded_utterance_ids: frozenset[str] = frozenset()) -> None:
+    """Render estimated notes with PrettyPitch and match the original duration."""
+    root, python, leapsinger = _runtime()
+    work = output.parent / "prettypitch"
+    work.mkdir(mode=0o700, exist_ok=True)
+    ust = work / "score.ust"
+    raw = work / "vocal.wav"
+    mora_table = work / "ja.mora"
+    ust.write_bytes(_ust(document, excluded_utterance_ids))
+    base = (root / "dict/ja.mora").read_text(encoding="utf-8")
+    present = {line.split(maxsplit=1)[0] for line in base.splitlines()
+               if line.strip() and not line.lstrip().startswith("#")}
+    additions = [line for line in MORA_ADDITIONS if line.split()[0] not in present]
+    mora_table.write_text(base.rstrip() + "\n" + "\n".join(additions) + "\n", encoding="utf-8")
+    if on_progress:
+        on_progress(0, 1)
+    process = subprocess.run([
+        str(python), "-m", "svs.render", str(ust), "-o", str(raw),
+        "--spk_id", "2", "--device", os.environ.get("PRETTYPITCH_DEVICE", "cuda"),
+        "--seed", "0", "--mora_table", str(mora_table),
+        "--leapsinger_root", str(leapsinger),
+    ], cwd=root, capture_output=True, text=True, timeout=900)
+    if process.returncode or not raw.is_file() or not raw.stat().st_size:
+        raise RuntimeError("PrettyPitch の歌唱合成に失敗しました: " + process.stderr[-1000:])
+    subprocess.run([
+        "ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(raw),
+        "-af", f"apad=whole_dur={duration_sec:.3f},atrim=duration={duration_sec:.3f}",
+        "-c:a", "pcm_s16le", str(output),
+    ], check=True, capture_output=True, timeout=60)
+    if on_progress:
+        on_progress(1, 1)
 
 
 def mix_accompaniment(vocal: Path, accompaniment: Path) -> None:
     """Overlay the separated instrumental on the synthesized voice."""
+    if probe_audio(accompaniment) + 0.5 < probe_audio(vocal):
+        raise ValueError("伴奏音声が歌い直し音声より短いため、合成を完了できません")
     mixed = vocal.with_name(vocal.stem + "-mixed.wav")
     try:
         subprocess.run([
