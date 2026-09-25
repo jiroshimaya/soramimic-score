@@ -127,6 +127,17 @@ class AudioPipelineError(RuntimeError):
         super().__init__(f"{stage}: {detail}")
 
 
+class CTCWindowCapacityError(AudioPipelineError):
+    """One timed lyric line has more CTC targets than its acoustic window."""
+
+    def __init__(self, line_index: int | None, available: int, required: int):
+        self.line_index = line_index
+        self.available = available
+        self.required = required
+        super().__init__("mora alignment",
+                         f"CTC window has {available} frames for {required} targets")
+
+
 def _run_adapter(stage: str, adapter: Callable[..., Sequence[object]], *args: object):
     try:
         return adapter(*args)
@@ -753,9 +764,33 @@ def analyze_audio(
     # A failure is reported. Do not fall back to the rejected ASR pronunciation.
     if on_progress:
         on_progress("モーラの時刻を推定しています")
-    moras = _validate_moras(
-        readings, _run_adapter("mora alignment", adapters.mora_aligner, path, lines, readings),
-    )
+
+    def align_retained(current_lines, current_readings):
+        while True:
+            try:
+                aligned = _validate_moras(current_readings, _run_adapter(
+                    "mora alignment", adapters.mora_aligner,
+                    path, current_lines, current_readings))
+                return current_lines, current_readings, aligned
+            except CTCWindowCapacityError as exc:
+                if lyrics is not None or exc.line_index is None:
+                    raise
+                index = exc.line_index
+                if not 0 <= index < len(current_lines):
+                    raise
+                semantic_evidence.append(Evidence(
+                    f"audio-ctc-capacity-{len(semantic_evidence)}",
+                    "soramimic_score.models", "lyric-semantic-gate", 0.,
+                    {"surface": current_lines[index].text, "status": "rejected",
+                     "reason": "ctc-window-capacity-insufficient",
+                     "available_frames": exc.available, "required_frames": exc.required},
+                ))
+                current_lines = current_lines[:index] + current_lines[index + 1:]
+                current_readings = current_readings[:index] + current_readings[index + 1:]
+                if not current_lines:
+                    raise AudioPipelineError("lyrics", "no acoustically alignable lyric lines")
+
+    lines, readings, moras = align_retained(lines, readings)
     if lyrics is None:
         rejected = []
         for index, line in enumerate(lines):
@@ -801,9 +836,7 @@ def analyze_audio(
             lines = _validate_lines(sorted(retained, key=lambda item: item.start_sec), timed=True)
             readings = _validate_readings(
                 lines, _run_adapter("readings", adapters.reading_selector, path, lines))
-            moras = _validate_moras(
-                readings, _run_adapter("mora alignment", adapters.mora_aligner,
-                                       path, lines, readings))
+            lines, readings, moras = align_retained(lines, readings)
     if lyrics is None and adapters.lyric_recoverer is not None:
         # Stage 3 owns note assignment. Probe once before retrying truly unowned
         # note runs; a raw gap between Whisper lines is not sufficient evidence.
@@ -960,8 +993,7 @@ def analyze_audio(
                                                key=lambda item: item.start_sec), timed=True)
                 readings = _validate_readings(lines, _run_adapter(
                     "readings", adapters.reading_selector, path, lines))
-                moras = _validate_moras(readings, _run_adapter(
-                    "mora alignment", adapters.mora_aligner, path, lines, readings))
+                lines, readings, moras = align_retained(lines, readings)
     if on_progress:
         on_progress("楽譜データを組み立てています")
     observations = build_audio_observations(lines, readings, moras, notes)

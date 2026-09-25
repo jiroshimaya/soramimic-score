@@ -14,7 +14,7 @@ from soramimic_score import (
     build_audio_observations,
     lyric_surface,
 )
-from soramimic_score.audio import is_credit_hallucination
+from soramimic_score.audio import CTCWindowCapacityError, is_credit_hallucination
 from soramimic_score.semantic import (contextual_non_lyric_template_families,
                                       credit_recovery_windows,
                                       non_lyric_template_family)
@@ -22,6 +22,30 @@ from soramimic_score.vocal_activity import VocalActivity
 
 
 class AudioPipelineTests(unittest.TestCase):
+    def test_automatic_ctc_capacity_drops_only_the_unalignable_line(self):
+        def readings(_path, lines):
+            return tuple(ReadingSelection(line.text, "test", 1) for line in lines)
+
+        def align(_path, lines, selected):
+            for index, line in enumerate(lines):
+                if line.text == "ア":
+                    raise CTCWindowCapacityError(index, 1, 4)
+            return tuple(AlignedMora(0, index, char, 1 + index * .2,
+                                     1 + (index + 1) * .2, .9)
+                         for index, char in enumerate(selected[0].kana))
+
+        adapters = AudioAdapters(readings, align,
+                                 lambda _: (MelodyNote(1, 1.4, 60),),
+                                 lambda _: (LyricLine("ア", 0, .1),
+                                            LyricLine("カキ", 1, 1.4)))
+        score = analyze_audio(self.audio, adapters)
+        self.assertEqual(score.score.canonical_text, "カキ")
+        self.assertTrue(any(item.detail.get("reason")
+                            == "ctc-window-capacity-insufficient"
+                            for item in score.observations.evidence))
+        with self.assertRaises(CTCWindowCapacityError):
+            analyze_audio(self.audio, adapters, lyrics=("ア", "カキ"))
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.audio = Path(self.temporary.name) / "input.wav"
