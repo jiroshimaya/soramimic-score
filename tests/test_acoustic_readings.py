@@ -15,7 +15,8 @@ from soramimic_score import (
 from soramimic_score.__main__ import analyze_main
 from soramimic_score.models import create_adapters, prepared_adapters
 from soramimic_score.readings import (
-    acoustic_windows, dictionary_candidates, select_acoustic_reading,
+    acoustic_windows, dictionary_candidates, grouped_acoustic_windows,
+    select_acoustic_reading,
 )
 from tests import test_audio_pipeline as fixtures
 
@@ -30,7 +31,7 @@ class ReadingChoiceTests(unittest.TestCase):
         self.assertFalse(result.detail["confidence_available"])
 
     def test_context_prefix_and_suffix_do_not_obscure_a_reading(self):
-        result = select_acoustic_reading(("アス", "アシタ"), {"mix": "ソレハアシタデス"})
+        result = select_acoustic_reading(("アス", "アシタ"), {"mix": "ソレトアシタデス"})
         self.assertEqual(result.kana, "アシタ")
 
     def test_conflicting_views_and_equal_distances_preserve_default(self):
@@ -48,10 +49,15 @@ class ReadingChoiceTests(unittest.TestCase):
         self.assertEqual(result.kana, "コー")
         self.assertEqual(result.detail["reason"], "ambiguous-evidence")
 
-    def test_unsupported_alternative_is_retained_without_nonfinite_json(self):
+    def test_small_vowel_evidence_uses_video_normalization_order(self):
+        result = select_acoustic_reading(("アス", "セェ"), {"mix": "セェ"})
+        self.assertEqual(result.kana, "アス")
+        self.assertEqual(result.detail["reason"], "weak-evidence")
+
+    def test_small_kana_alternative_is_retained_without_nonfinite_json(self):
         result = select_acoustic_reading(("アス", "ァ"), {"mix": "アス"})
         self.assertEqual(result.candidates, ("アス", "ァ"))
-        self.assertIsNone(result.detail["distances"][1]["mix"])
+        self.assertEqual(result.detail["distances"][1]["mix"], 0.0)
 
     def test_windows_bound_context_and_cover_long_lines(self):
         self.assertEqual(acoustic_windows(2, 5, 10), ((.5, 6.5),))
@@ -60,6 +66,12 @@ class ReadingChoiceTests(unittest.TestCase):
         for window in ((-1, 1, 2), (1, 1, 2), (0, 3, 2), (0, float("nan"), 3)):
             with self.assertRaises(ValueError):
                 acoustic_windows(*window)
+
+    def test_nearby_lines_share_video_style_kana_context(self):
+        windows, assigned = grouped_acoustic_windows(
+            [(2, 3), (4, 5), (14, 15)], range(3), 20)
+        self.assertEqual(windows, ((.5, 6.5), (12.5, 16.5)))
+        self.assertEqual(assigned, {0: (0,), 1: (0,), 2: (1,)})
 
     @unittest.skipUnless(importlib.util.find_spec("MeCab"), "audio dependencies not installed")
     def test_real_dictionary_keeps_unequal_mora_lengths(self):
@@ -173,7 +185,7 @@ class PreparedAudioTests(unittest.TestCase):
             result = create_adapters(self.config, vocals_path=vocals).reading_selector(
                 self.audio, (LyricLine("明日", 2, 5),))
         self.assertEqual(transcribe.call_args.args[0], {"mix": self.audio, "vocals": vocals})
-        self.assertEqual(transcribe.call_args.args[1], [(.5, 6.5)])
+        self.assertEqual(transcribe.call_args.args[1], ((.5, 6.5),))
         self.assertEqual(result[0].kana, "アシタ")
         self.assertEqual(result[0].source, "kana-whisper")
         self.assertEqual(result[0].detail["candidate_provenance"], provenance)

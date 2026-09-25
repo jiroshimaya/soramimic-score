@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor
 import math
 import logging
 from pathlib import Path
@@ -13,7 +14,8 @@ from .audio import (AudioAdapters, AlignedMora, CTCWindowCapacityError,
 from .audio import _run_adapter
 from .acoustic import KANA_MODEL, release_memory as _release, separate_vocals, transcribe_kana_views
 from .japanese import kana_to_moras, katakana
-from .readings import acoustic_windows, dictionary_readings, select_acoustic_reading
+from .readings import (dictionary_readings, grouped_acoustic_windows,
+                       select_acoustic_reading, token_reading_proposals)
 
 logger = logging.getLogger(__name__)
 
@@ -325,10 +327,14 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
             del model
             _release()
 
-    def select_readings(path, lines):
-        defaults = dictionary_readings(path, lines)
+    def select_readings(path, lines, *, automatic=False):
+        defaults = dictionary_readings(path, lines, automatic=automatic)
         candidates = tuple(reading.candidates for reading in defaults)
-        ambiguous = [index for index, row in enumerate(candidates) if len(row) > 1]
+        potential = (tuple(token_reading_proposals(line.text, candidates[index][0])
+                           for index, line in enumerate(lines)) if automatic else
+                     ((),) * len(lines))
+        ambiguous = [index for index, row in enumerate(candidates)
+                     if len(row) > 1 or potential[index]]
         if not ambiguous:
             return defaults
         if all(line.start_sec is not None and line.end_sec is not None for line in lines):
@@ -342,11 +348,8 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
                             for index in range(len(lines))]
         import librosa
         duration = librosa.get_duration(path=str(path))
-        windows, assignments = [], {}
-        for index in ambiguous:
-            selected_windows = acoustic_windows(*line_windows[index], duration)
-            assignments[index] = tuple(range(len(windows), len(windows) + len(selected_windows)))
-            windows.extend(selected_windows)
+        windows, assignments = grouped_acoustic_windows(
+            line_windows, range(len(lines)), duration)
         paths = {"mix": path}
         if vocals_path is not None:
             paths["vocals"] = vocals_path
@@ -355,9 +358,14 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
         for index in ambiguous:
             views = {view: "".join(rows[i] for i in assignments[index])
                      for view, rows in transcripts.items()}
-            selection = select_acoustic_reading(candidates[index], views)
+            proposals = (token_reading_proposals(
+                lines[index].text, candidates[index][0], tuple(views.values()))
+                if automatic and potential[index] else ())
+            choices = tuple(dict.fromkeys((*candidates[index], *proposals)))
+            selection = select_acoustic_reading(choices, views)
             result[index] = replace(selection, detail={
                 **defaults[index].detail, **selection.detail,
+                "dictionary_proposals": list(proposals),
                 "windows_sec": [list(windows[i]) for i in assignments[index]],
                 "model": config.kana_model,
                 "vocal_separator": "demucs-htdemucs" if vocals_path else None,
@@ -377,8 +385,7 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
     def kana_views(paths, windows):
         if shared is None:
             return transcribe_kana_views(paths, windows, config)
-        results = {}
-        for view, source in paths.items():
+        def transcribe(source):
             response = shared.run("kana-whisper", source, {
                 "device": "auto", "windows": [[start, end] for start, end in windows],
             })
@@ -387,14 +394,31 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
                     or len(response["texts"]) != len(windows)
                     or not all(isinstance(text, str) for text in response["texts"])):
                 raise RuntimeError("shared KanaWhisper response is invalid")
-            results[view] = tuple(response["texts"])
-        return results
+            return tuple(response["texts"])
+        with ThreadPoolExecutor(max_workers=len(paths)) as executor:
+            pending = {view: executor.submit(transcribe, source)
+                       for view, source in paths.items()}
+            return {view: task.result() for view, task in pending.items()}
 
     def vocal_activity(path, windows):
         from .vocal_activity import measure_vocal_activity
         return measure_vocal_activity(vocals_path or path, windows)
 
+    def vocalization_reattacks(mora, start, end):
+        from .ctc_reattacks import decode_repeated_mora_reattacks
+        if not emission_cache:
+            raise RuntimeError("CTC emissions must be computed before reattack detection")
+        return decode_repeated_mora_reattacks(
+            emission_cache["probs"], emission_cache["token_ids"], mora, start, end,
+            stride=emission_cache["stride"], rate=emission_cache["rate"],
+        )
+
+    if config.acoustic_readings:
+        automatic_selector = lambda path, lines: select_readings(path, lines, automatic=True)
+    else:
+        automatic_selector = lambda path, lines: dictionary_readings(path, lines, automatic=True)
     return AudioAdapters(select_readings if config.acoustic_readings else dictionary_readings,
                          align, melody, recognize, lyric_reading, recover_window,
                          repeat_evidence, vocal_activity if vocals_path is not None else None,
-                         repeat_evidence_mix if vocals_path is not None else None)
+                         repeat_evidence_mix if vocals_path is not None else None,
+                         vocalization_reattacks, automatic_selector)
