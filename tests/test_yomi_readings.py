@@ -33,6 +33,13 @@ class YomiReadingsTests(unittest.TestCase):
         self.module.start()
         self.addCleanup(self.module.stop)
 
+    def test_automatic_reading_with_sokuon(self):
+        self.yomi.return_value = [Candidate("ヤッタ")]
+        with patch("soramimic_score.readings.dictionary_candidates",
+                   return_value=(("ヤッタ",),)):
+            selection, = dictionary_readings(None, (LyricLine("やった"),), automatic=True)
+        self.assertEqual(selection.kana, "ヤッタ")
+
     @unittest.skipUnless(importlib.util.find_spec("MeCab"), "audio dependencies not installed")
     def test_alternate_word_segmentation_keeps_imayoru(self):
         candidates, = dictionary_candidates((LyricLine("二人今夜に駆け出してく"),))
