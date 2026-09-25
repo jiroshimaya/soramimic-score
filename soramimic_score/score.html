@@ -43,7 +43,7 @@ audio{width:100%;margin:14px 0}canvas{width:100%;height:auto;border-radius:12px;
   <textarea id="lyrics-input" name="lyrics" placeholder="入力すると解析結果に対応付けて字幕に表示します。空欄なら認識した歌詞を使います。"></textarea>
   <p class="details">解析には時間がかかります。歌詞や音符には誤認識があり得ます。音源と結果は解析終了から約1時間後に自動削除します。結果画面からすぐ削除することもできます。<a href="/guidelines">利用ガイドライン</a></p>
   <button id="submit">解析する</button><div id="status" role="status"></div>
-  <div class="progress" id="progress" hidden><span class="spinner" aria-hidden="true"></span><div class="progress-body"><strong id="progress-label">準備しています</strong><progress class="progress-meter" id="progress-meter" max="9" value="0"></progress><small id="progress-detail">経過 0:00・残りの作業を確認しています</small></div></div>
+  <div class="progress" id="progress" hidden><span class="spinner" aria-hidden="true"></span><div class="progress-body"><strong id="progress-label">準備しています</strong><progress class="progress-meter" id="progress-meter" max="10" value="0"></progress><small id="progress-detail">経過 0:00・残りの作業を確認しています</small></div></div>
 </form>
 <section id="result" class="card" hidden>
   <h2>ピアノロール・歌詞プレビュー</h2>
@@ -64,9 +64,10 @@ const audioFile=document.querySelector('#audio-file'),uploadZone=document.queryS
 const selection=document.querySelector('#selection'),selectedName=document.querySelector('#selected-name');
 const recordButton=document.querySelector('#record-audio'),progress=document.querySelector('#progress'),progressLabel=document.querySelector('#progress-label');
 const progressMeter=document.querySelector('#progress-meter'),progressDetail=document.querySelector('#progress-detail');
-const phaseNames=['音声の準備','歌声の分離','歌詞の認識','音符と音高の推定','歌詞の再確認','読みの確認','モーラ時刻の推定','楽譜データの組み立て','書き出し'];
+const phaseNames=['音声の準備','歌声の分離','歌詞の認識','音符と音高の推定','歌詞の再確認','読みの確認','モーラ時刻の推定','楽譜データの組み立て','書き出し','PrettyPitchで歌唱合成'];
 let jobCreatedAt=null,progressClock=null,currentStage='';
 function phaseIndex(stage){
+  if(/PrettyPitch|歌唱合成|伴奏|合成の順番/.test(stage))return 9;
   if(/書き出し/.test(stage))return 8;
   if(/組み立て/.test(stage))return 7;
   if(/モーラ|字幕候補/.test(stage))return 6;
@@ -82,7 +83,7 @@ function updateProgress(){
   progressMeter.value=Math.max(progressMeter.value,index);
   progressDetail.textContent=`経過 ${Math.floor(elapsed/60)}:${String(elapsed%60).padStart(2,'0')}・残り: ${phaseNames.slice(index+1).join(' → ')||'完了待ち'}`;
 }
-let data=null,jobId=null,recording=null,audioContext=null,audioDestination=null,lineWindows=[],playbackChoice=0;
+let data=null,jobId=null,recording=null,audioContext=null,audioDestination=null,lineWindows=[],playbackChoice=0,resingReady=false;
 player.addEventListener('error',()=>{
   if(jobId&&player.src.endsWith('/audio'))player.src=`/api/jobs/${jobId}/audio-wav`;
 });
@@ -160,7 +161,8 @@ form.addEventListener('submit',async event=>{
   }catch(error){status.textContent=error.message;progress.hidden=true;submit.disabled=false}
 });
 async function loadJob(id){
-  jobId=id;submit.disabled=true;progress.hidden=false;result.hidden=true;
+  jobId=id;resingReady=false;submit.disabled=true;progress.hidden=false;result.hidden=true;
+  document.querySelector('#resing-audio').textContent='PrettyPitchで歌い直す';
   if(progressClock)clearInterval(progressClock);progressClock=setInterval(updateProgress,1000);
   try{
     while(true){const state=await json(`/api/jobs/${jobId}`);
@@ -175,13 +177,24 @@ async function loadJob(id){
     }
     data=await json(`/api/jobs/${jobId}/score`);buildLineWindows();player.src=`/api/jobs/${jobId}/audio`;
     document.querySelector('#result-link').href=`/?job=${jobId}`;
-    const voiceState=await json(`/api/jobs/${jobId}/resing`);
-    if(voiceState.state==='done')document.querySelector('#resing-audio').textContent='PrettyPitchの歌声を再生';
+    let voiceState=await json(`/api/jobs/${jobId}/resing`);
+    while(['queued','running'].includes(voiceState.state)){
+      status.textContent='歌声を合成しています…';
+      progressLabel.textContent=voiceState.stage||'歌唱合成の順番を待っています';
+      currentStage='PrettyPitchで歌唱合成';updateProgress();
+      await pause(2000);
+      voiceState=await json(`/api/jobs/${jobId}/resing`);
+    }
+    resingReady=voiceState.state==='done';
+    if(resingReady)document.querySelector('#resing-audio').textContent='PrettyPitchの歌声を再生';
+    if(voiceState.state==='failed')document.querySelector('#resing-audio').textContent='歌い直しを再試行';
     document.querySelector('#downloads').replaceChildren();
     for(const [ext,label] of [['json','歌詞・音符JSON'],['mid','MIDI'],['musicxml','MusicXML'],['srt','SRT字幕'],['lrc','LRC歌詞']]){
       const a=document.createElement('a');a.className='link';a.href=`/api/jobs/${jobId}/download/${ext}`;a.download=`score.${ext}`;a.textContent=label;document.querySelector('#downloads').append(a);
     }
-    result.hidden=false;status.textContent='解析が完了しました。';draw();result.scrollIntoView({behavior:'smooth'});
+    result.hidden=false;status.textContent=voiceState.state==='failed'
+      ?'解析は完了しました。歌唱合成に失敗しました。必要なら再試行できます。':'解析が完了しました。';
+    draw();result.scrollIntoView({behavior:'smooth'});
   }catch(error){status.textContent=error.message}finally{progress.hidden=true;submit.disabled=false;clearInterval(progressClock);progressClock=null}
 }
 const rememberedJob=new URLSearchParams(location.search).get('job');
@@ -199,17 +212,26 @@ function currentLine(t){
 }
 document.querySelector('#original-audio').addEventListener('click',()=>{
   if(!jobId)return;
-  playbackChoice++;
-  document.querySelector('#resing-status').textContent='元音源を再生中';
-  const t=player.currentTime;player.src=`/api/jobs/${jobId}/audio`;player.currentTime=t;player.play();
+  playFromTap(`/api/jobs/${jobId}/audio`,'元音源を再生中',++playbackChoice);
 });
+function playFromTap(source,label,choice){
+  const message=document.querySelector('#resing-status'),t=player.currentTime;
+  if(player.getAttribute('src')!==source)player.src=source;
+  player.currentTime=t;
+  // iOS Safari needs play() inside the tap handler, before any network await.
+  const started=player.play();
+  Promise.resolve(started).then(
+    ()=>{if(choice===playbackChoice)message.textContent=label},
+    ()=>{if(choice===playbackChoice)message.textContent='再生できません。再生バーの▶を押してください'},
+  );
+}
 document.querySelector('#delete-job').addEventListener('click',async()=>{
   if(!jobId||!window.confirm('この音源と解析結果をサーバーから削除します。よろしいですか？'))return;
   const button=document.querySelector('#delete-job');button.disabled=true;
   try{
     await json(`/api/jobs/${jobId}`,{method:'DELETE'});
     playbackChoice++;player.pause();player.removeAttribute('src');player.load();
-    data=null;jobId=null;lineWindows=[];result.hidden=true;
+    data=null;jobId=null;resingReady=false;lineWindows=[];result.hidden=true;
     history.replaceState(null,'','/');status.textContent='音源と解析結果を削除しました。';
   }catch(error){status.textContent=error.message}finally{button.disabled=false}
 });
@@ -217,6 +239,10 @@ document.querySelector('#resing-audio').addEventListener('click',async()=>{
   if(!jobId)return;
   const button=document.querySelector('#resing-audio'),message=document.querySelector('#resing-status');
   const choice=++playbackChoice;
+  if(resingReady){
+    playFromTap(`/api/jobs/${jobId}/resing/audio`,'PrettyPitch:波音リツの歌声を再生中',choice);
+    return;
+  }
   button.disabled=true;
   try{
     await json(`/api/jobs/${jobId}/resing`,{method:'POST'});
@@ -227,11 +253,8 @@ document.querySelector('#resing-audio').addEventListener('click',async()=>{
       if(choice===playbackChoice)message.textContent=state.stage||'歌唱合成の順番を待っています';
       await pause(2000);
     }
-    button.textContent='PrettyPitchの歌声を再生';
-    if(choice!==playbackChoice)return;
-    const t=player.currentTime;player.src=`/api/jobs/${jobId}/resing/audio`;
-    player.currentTime=t;await player.play();
-    if(choice===playbackChoice)message.textContent='PrettyPitch:波音リツの歌声を再生中';
+    resingReady=true;button.textContent='PrettyPitchの歌声を再生';
+    if(choice===playbackChoice)message.textContent='歌い直しができました。もう一度押すと再生します';
   }catch(error){if(choice===playbackChoice)message.textContent=error.message}finally{button.disabled=false}
 });
 player.addEventListener('ended',()=>{

@@ -152,9 +152,17 @@ def create_app(*, data_root: Path | None = None, analyzer=None, public: bool | N
                 result = analyzer(job_dir / "input.wav", model_config=config, lyrics=lyrics)
             progress("書き出しを準備しています")
             dump(result, job_dir / "score.json")
+            from .resing import available
+            auto_resing = os.environ.get("SORAMIMIC_SCORE_AUTO_RESING") == "1" and available()
             with sqlite3.connect(db) as conn:
-                conn.execute("UPDATE jobs SET state='done', stage=NULL, finished=? WHERE id=?",
-                             (datetime.now(timezone.utc).isoformat(), job))
+                conn.execute("UPDATE jobs SET state='done', stage=NULL, finished=?, "
+                             "synth_state=?, synth_backend=?, synth_stage=? WHERE id=?",
+                             (datetime.now(timezone.utc).isoformat(),
+                              "queued" if auto_resing else None,
+                              "prettypitch" if auto_resing else None,
+                              "順番を待っています" if auto_resing else None, job))
+            if auto_resing:
+                synth_pool.submit(resing, job)
         except Exception as exc:
             logger.exception("score analysis failed for job %s", job)
             message = "解析に失敗しました。音源と設定を確認してください"
@@ -195,13 +203,15 @@ def create_app(*, data_root: Path | None = None, analyzer=None, public: bool | N
                                  ("伴奏を重ねています", job))
                 mix_accompaniment(output, accompaniment)
             with sqlite3.connect(db) as conn:
-                conn.execute("UPDATE jobs SET synth_state='done', synth_stage=NULL WHERE id=?", (job,))
+                conn.execute("UPDATE jobs SET synth_state='done', synth_stage=NULL, finished=? WHERE id=?",
+                             (datetime.now(timezone.utc).isoformat(), job))
         except Exception:
             logger.exception("score resinging failed for job %s", job)
             output.unlink(missing_ok=True)
             with sqlite3.connect(db) as conn:
                 conn.execute("UPDATE jobs SET synth_state='failed', synth_stage=NULL, "
-                             "synth_error='歌唱合成に失敗しました' WHERE id=?", (job,))
+                             "synth_error='歌唱合成に失敗しました', finished=? WHERE id=?",
+                             (datetime.now(timezone.utc).isoformat(), job))
 
     @app.get("/healthz")
     def health():

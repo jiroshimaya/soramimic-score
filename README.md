@@ -81,8 +81,10 @@ MP3・M4A・WAV・FLAC・Ogg・WebMなどの音声を選択、ドロップ、ま
 保存できます。Score JSON、標準MIDI、MusicXML、SRT、LRCをダウンロードできます。
 入力歌詞を指定した場合、対応が確かな行の字幕にはその表記を使用します。
 時刻が音声から得られなかったモーラは音符区間からの推定値です。
-「PrettyPitchで歌い直す」を押すと、利用者が要求したジョブだけを波音リツの歌声で合成し、
-元音源の時間軸に合わせ、分離した伴奏と重ねて再生します。
+「PrettyPitchで歌い直す」を押すと、波音リツの歌声を合成し、元音源の時間軸に合わせ、
+分離した伴奏と重ねて再生します。`SORAMIMIC_SCORE_AUTO_RESING=1` を設定した環境では
+解析後に自動で合成し、結果画面でそのまま再生できます。合成に失敗しても解析結果は
+表示され、画面から再試行できます。公開環境では初期設定は手動合成です。
 外部のPrettyPitch、LeapSinger、各モデルが必要です。実行環境は `PRETTYPITCH_ROOT`、
 `PRETTYPITCH_PYTHON`、`PRETTYPITCH_LEAPSINGER_ROOT`、`PRETTYPITCH_DEVICE` で指定します。
 歌声モデルとボコーダの利用条件に従ってください。

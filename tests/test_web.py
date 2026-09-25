@@ -167,6 +167,29 @@ class ScoreWebTests(unittest.TestCase):
                 time.sleep(.02)
             self.assertEqual(self.client.get(f"/api/jobs/{job}/resing").json()["state"], "done")
 
+    def test_auto_resinging_runs_after_analysis_when_enabled(self):
+        def synthesize(_document, output, **kwargs):
+            output.write_bytes(wav_bytes())
+            kwargs["on_progress"](1, 1)
+        with patch.dict("os.environ", {"SORAMIMIC_SCORE_SHEETSAGE_MODEL": "a",
+                                    "SORAMIMIC_SCORE_SHEETSAGE_BASE": "b",
+                                    "SORAMIMIC_SCORE_AUTO_RESING": "1"}), patch(
+            "soramimic_score.resing.available", return_value=True
+        ), patch("soramimic_score.resing.synthesize", side_effect=synthesize) as render:
+            job = self.submit().json()["id"]
+            for _ in range(100):
+                if self.client.get(f"/api/jobs/{job}").json()["state"] == "done":
+                    break
+                time.sleep(.02)
+            for _ in range(100):
+                state = self.client.get(f"/api/jobs/{job}/resing").json()
+                if state["state"] == "done":
+                    break
+                time.sleep(.02)
+            self.assertEqual(state["state"], "done")
+            render.assert_called_once()
+            self.assertEqual(self.client.get(f"/api/jobs/{job}/resing/audio").status_code, 200)
+
     def test_resinging_is_unavailable_without_renderer(self):
         with patch.dict("os.environ", {"SORAMIMIC_SCORE_SHEETSAGE_MODEL": "a",
                                     "SORAMIMIC_SCORE_SHEETSAGE_BASE": "b"}):

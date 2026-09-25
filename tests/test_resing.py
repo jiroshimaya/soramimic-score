@@ -98,6 +98,8 @@ class ResingTests(unittest.TestCase):
                 "soramimic_score.resing.subprocess.run", side_effect=run
             ):
                 synthesize(document, output, duration_sec=2)
+            mora_table = (root.parent / "prettypitch/ja.mora").read_text()
+            self.assertIn("リャ ry A", mora_table)
             with wave.open(str(output)) as wav:
                 self.assertEqual(wav.getnframes(), 48000)
                 self.assertIn(b"\x01\x00", wav.readframes(wav.getnframes()))

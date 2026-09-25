@@ -12,7 +12,7 @@ from .media import probe_audio
 
 
 TICKS_PER_SECOND = 960  # 120 BPM, 480 ticks per beat
-MORA_ADDITIONS = ("リュ ry U", "リョ ry O", "ヴィ v I")
+MORA_ADDITIONS = ("リャ ry A", "リュ ry U", "リョ ry O", "ヴィ v I")
 
 
 def _runtime() -> tuple[Path, Path, Path]:
