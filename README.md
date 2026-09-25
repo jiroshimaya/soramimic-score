@@ -52,6 +52,7 @@ flowchart TD
 
 Python 3.11 以降、Git、音声モデル、FFmpeg、FFprobe を用意します。
 SheetSage2 と MERT-v2-FullSong は、利用条件を確認してローカルに配置してください。
+`SORAMIMIC_SCORE_DATA` には Git リポジトリ外の保存先を指定します。
 次のパスは配置先の例です。
 
 ```sh
@@ -62,30 +63,8 @@ export SORAMIMIC_SCORE_DATA=/path/to/private-score-data
 uv run --extra audio --extra web uvicorn soramimic_score.web:app --host 127.0.0.1 --port 8313 --no-access-log
 ```
 
-ブラウザから MP3、M4A、WAV、FLAC、Ogg、WebM などの音声を選択、ドロップ、または録音できます。
-正解歌詞の入力は任意です。
-解析中は歌詞認識、モーラ時刻、音高推定などの段階を表示します。
-結果画面では音源と同期したピアノロールや字幕を確認でき、ブラウザが対応していれば字幕入り WebM 動画も保存できます。
-Score JSON、標準 MIDI、MusicXML、SRT、LRC もダウンロードできます。
-入力歌詞と対応が取れた行には、その歌詞の表記を使います。
-音声から時刻を得られなかったモーラには、音符区間から推定した時刻を使います。
-
-「PrettyPitch で歌い直す」を押すと、推定した音符と歌詞から波音リツの歌声を合成し、分離した伴奏と重ねて再生します。
-`SORAMIMIC_SCORE_AUTO_RESING=1` を設定すると、解析後に自動で合成します。
-合成に失敗した場合も解析結果は表示され、結果画面から再試行できます。
-公開環境の初期設定では手動合成です。
-歌い直しには外部の PrettyPitch、LeapSinger、各モデルが必要です。
-実行環境は `PRETTYPITCH_ROOT`、`PRETTYPITCH_PYTHON`、`PRETTYPITCH_LEAPSINGER_ROOT`、`PRETTYPITCH_DEVICE` で指定します。
-歌声モデルとボコーダの利用条件も確認してください。
-
-音源、入力歌詞、解析結果は `SORAMIMIC_SCORE_DATA` 以下に保存します。
-この保存先は Git リポジトリの外に置いてください。
-ジョブの完了または失敗から 1 時間を過ぎると、約 5 分間隔の掃除処理で削除します。
-結果画面からすぐに削除することもできます。
-結果の URL を知る人は保存中の結果を取得できるため、共有する場合は注意してください。
-
-公開用に `SORAMIMIC_SCORE_PUBLIC=1` を設定すると、UTC の日付ごとに IP アドレスあたり 100 件までアップロードを受け付けます。
-公開前にリバースプロキシで TLS とアップロード上限を設定してください。
+起動後、ブラウザで `http://127.0.0.1:8313/` を開きます。
+デモ GUI で音源を解析し、歌詞と音符をピアノロールで確認できます。
 
 ## コマンドラインで使う
 
