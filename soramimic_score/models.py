@@ -8,7 +8,8 @@ import logging
 from pathlib import Path
 import tempfile
 
-from .audio import AudioAdapters, AlignedMora, LyricLine, MelodyNote
+from .audio import (AudioAdapters, AlignedMora, CTCWindowCapacityError,
+                    LyricLine, MelodyNote)
 from .audio import _run_adapter
 from .acoustic import KANA_MODEL, release_memory as _release, separate_vocals, transcribe_kana_views
 from .japanese import kana_to_moras, katakana
@@ -273,7 +274,8 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
                         owners.append((li, mi))
             required = len(targets) + sum(a == b for a, b in zip(targets, targets[1:]))
             if not targets or hi - lo < required:
-                raise ValueError("Lyrics do not fit the available acoustic alignment frames")
+                raise CTCWindowCapacityError(indices[0] if len(indices) == 1 else None,
+                                             hi - lo, required)
             alignment, scores = taf.forced_align(probs[lo:hi].unsqueeze(0).float(),
                                                  torch.tensor([targets]), blank=blank)
             spans = taf.merge_tokens(alignment[0], scores[0].exp(), blank=blank)

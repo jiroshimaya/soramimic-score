@@ -10,6 +10,7 @@ import wave
 from unittest.mock import patch
 
 from soramimic_score import ModelConfig, LyricLine, analyze_audio, load
+from soramimic_score.audio import CTCWindowCapacityError
 from soramimic_score.__main__ import analyze_main
 from soramimic_score.models import create_adapters, dictionary_readings, read_melody_lab
 from soramimic_score.shared_inference import SharedInference
@@ -299,8 +300,9 @@ class ModelTests(unittest.TestCase):
             self.assertEqual(audio_loader.call_args.args[0], str(vocal_path))
             self.assertIn("demucs-htdemucs", vocal_moras[0].source)
             self.assertEqual([m.start_sec for m in vocal_moras], [m.start_sec for m in moras])
-            with self.assertRaisesRegex(ValueError, "frames"):
+            with self.assertRaises(CTCWindowCapacityError) as error:
                 align(path, (LyricLine("ああ", 0, .02),), readings)
+            self.assertEqual(error.exception.line_index, 0)
 
             # A 20.5s clip places EOF in the first core's right context.
             # The second core must not repeat those frames on the song clock.
