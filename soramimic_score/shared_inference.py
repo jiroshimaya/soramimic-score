@@ -38,7 +38,16 @@ class SharedInference:
                           "parameters": json.dumps(parameters, ensure_ascii=False)},
                     timeout=(5, 300),
                 )
-            response.raise_for_status()
+            try:
+                response.raise_for_status()
+            except requests.HTTPError as exc:
+                try:
+                    detail = response.json().get("detail")
+                except (ValueError, AttributeError):
+                    detail = None
+                if detail:
+                    raise RuntimeError(f"shared {kind} request rejected: {detail}") from exc
+                raise
             job_id = response.json()["id"]
             while True:
                 response = requests.get(f"{self.url}/v1/jobs/{job_id}", timeout=(5, 30))

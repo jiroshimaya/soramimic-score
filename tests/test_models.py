@@ -8,16 +8,55 @@ from types import SimpleNamespace
 import unittest
 import wave
 from unittest.mock import patch
+import requests
 
 from soramimic_score import ModelConfig, LyricLine, analyze_audio, load
 from soramimic_score.audio import CTCWindowCapacityError
 from soramimic_score.__main__ import analyze_main
-from soramimic_score.models import create_adapters, dictionary_readings, read_melody_lab
+from soramimic_score.models import (_transcribe_shared_kana, create_adapters,
+                                    dictionary_readings, read_melody_lab)
 from soramimic_score.shared_inference import SharedInference
 from tests import test_audio_pipeline as fixtures
 
 
 class ModelTests(unittest.TestCase):
+    def test_shared_inference_preserves_worker_rejection_reason(self):
+        class Response:
+            def __init__(self, body, rejected=False):
+                self.body = body
+                self.rejected = rejected
+            def raise_for_status(self):
+                if self.rejected:
+                    raise requests.HTTPError("422")
+            def json(self):
+                return self.body
+
+        with tempfile.TemporaryDirectory() as directory:
+            audio = Path(directory) / "audio.wav"
+            audio.write_bytes(b"audio")
+            with patch("soramimic_score.shared_inference.requests.get", return_value=Response({
+                "status": "ok", "api": {"name": "soramimic-audio-inference", "version": 1},
+                "capabilities": {"demucs": True, "whisper": True,
+                                 "kana_whisper": True, "sheetsage2": True},
+            })), patch("soramimic_score.shared_inference.requests.post",
+                       return_value=Response({"detail": "window is invalid"}, True)):
+                client = SharedInference("http://localhost:8320")
+                with self.assertRaisesRegex(RuntimeError, "window is invalid"):
+                    client.run("kana-whisper", audio, {"windows": [[0, 1]]})
+
+    def test_shared_kana_windows_respect_worker_limit_and_restore_order(self):
+        class Shared:
+            def run(self, kind, audio, parameters):
+                self.windows = parameters["windows"]
+                return {"texts": ["早い", "長い", "遅い"]}
+
+        shared = Shared()
+        windows = ((40., 41.), (1.25, 25.250000000000004), (30., 31.))
+        self.assertEqual(_transcribe_shared_kana(shared, Path("audio.wav"), windows),
+                         ("遅い", "早い", "長い"))
+        self.assertEqual([window[0] for window in shared.windows], [1.25, 30., 40.])
+        self.assertLess(shared.windows[0][1] - shared.windows[0][0], 24.)
+
     def test_shared_inference_job_is_deleted_after_result(self):
         calls = []
         class Response:
