@@ -20,6 +20,29 @@ from .readings import (dictionary_readings, grouped_acoustic_windows,
 logger = logging.getLogger(__name__)
 
 
+def _transcribe_shared_kana(shared, source: Path, windows):
+    """Match the worker's ordered, 24-second window contract without changing callers' order."""
+    if any(not math.isfinite(start + end) or start < 0 or end <= start
+           or end - start > 24.001 for start, end in windows):
+        raise ValueError("Invalid shared KanaWhisper window")
+    order = sorted(range(len(windows)), key=lambda index: (windows[index][0], index))
+    ordered_windows = [[windows[index][0],
+                        min(windows[index][1], windows[index][0] + 23.999)]
+                       for index in order]
+    response = shared.run("kana-whisper", source, {
+        "device": "auto", "windows": ordered_windows,
+    })
+    if (not isinstance(response, dict)
+            or not isinstance(response.get("texts"), list)
+            or len(response["texts"]) != len(windows)
+            or not all(isinstance(text, str) for text in response["texts"])):
+        raise RuntimeError("shared KanaWhisper response is invalid")
+    texts = [""] * len(windows)
+    for index, value in zip(order, response["texts"], strict=True):
+        texts[index] = value
+    return tuple(texts)
+
+
 @dataclass(frozen=True)
 class ModelConfig:
     sheetsage_model: Path
@@ -386,15 +409,7 @@ def create_adapters(config: ModelConfig, *, vocals_path: Path | None = None,
         if shared is None:
             return transcribe_kana_views(paths, windows, config)
         def transcribe(source):
-            response = shared.run("kana-whisper", source, {
-                "device": "auto", "windows": [[start, end] for start, end in windows],
-            })
-            if (not isinstance(response, dict)
-                    or not isinstance(response.get("texts"), list)
-                    or len(response["texts"]) != len(windows)
-                    or not all(isinstance(text, str) for text in response["texts"])):
-                raise RuntimeError("shared KanaWhisper response is invalid")
-            return tuple(response["texts"])
+            return _transcribe_shared_kana(shared, source, windows)
         with ThreadPoolExecutor(max_workers=len(paths)) as executor:
             pending = {view: executor.submit(transcribe, source)
                        for view, source in paths.items()}
